@@ -112,10 +112,14 @@ Environment="DISPLAY=:0"
 Environment="XAUTHORITY=$HOME_DIR/.Xauthority"
 ExecStartPre=/bin/sleep 5
 ExecStart=/usr/bin/python3 $APP_SCRIPT_PATH
+ExecStopPost=/bin/pkill -9 -f "soffice|libreoffice"
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal
 StandardError=journal
+TimeoutStopSec=30
+KillMode=mixed
+KillSignal=SIGTERM
 
 [Install]
 WantedBy=graphical.target
