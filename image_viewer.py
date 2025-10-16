@@ -11,6 +11,7 @@ from logging.handlers import RotatingFileHandler
 from datetime import datetime, timedelta
 import tempfile
 import shutil
+import gc
 
 LOG_FILE = "/var/log/pi-photo-viewer/app.log"
 logger = logging.getLogger(__name__)
@@ -29,7 +30,7 @@ SUPPORTED_FORMATS = (".xlsx", ".png", ".jpg", ".jpeg", ".gif", ".bmp")
 FOLDERS_TO_IGNORE = ["system volume information", "$recycle.bin"]
 LOGO_WIDTH = 175
 FALLBACK_SCAN_INTERVAL = 30
-IMAGE_CACHE_SIZE = 3
+IMAGE_CACHE_SIZE = 2
 MAX_IMAGE_DIMENSION = 1920
 CACHE_STALE_DAYS = 7
 
@@ -57,13 +58,17 @@ class ImageCache:
             self.order.remove(path)
         elif len(self.cache) >= self.max_size:
             removed = self.order.pop(0)
-            del self.cache[removed]
+            # Force garbage collection
+            if removed in self.cache:
+                del self.cache[removed]
+            gc.collect()
         self.cache[path] = photo
         self.order.append(path)
     
     def clear(self):
         self.cache.clear()
         self.order.clear()
+        gc.collect()
 
 class ExcelConverter:
     def __init__(self, cache_dir="/tmp/pi-photo-viewer-cache"):
@@ -159,6 +164,7 @@ class ExcelConverter:
                 return None
             finally:
                 shutil.rmtree(temp_dir, ignore_errors=True)
+                gc.collect()
         except Exception as e:
             logger.error(f"Conversion error: {e}")
             return None
@@ -350,6 +356,7 @@ class FullscreenImageApp:
         self.stop_threads = False
         self.excel_converter = ExcelConverter()
         self.precache_thread = None
+        self.current_photoimage = None
         
         self.media_watcher = MediaWatcher(self.on_media_change)
         self.media_watcher.start()
@@ -612,60 +619,4 @@ class FullscreenImageApp:
     def load_file_threaded(self, file_path, page, cache_key):
         try:
             if file_path.lower().endswith(".xlsx"):
-                sheet_type = page.lower() if page != "Image" else "front"
-                actual_sheet = self.excel_converter.find_sheet(file_path, sheet_type)
-                
-                if not actual_sheet:
-                    self.root.after(0, self.update_ui_with_error, f"Could not find '{page}' sheet")
-                    return
-                
-                png_path = self.excel_converter.convert_excel_to_png(file_path, actual_sheet)
-                
-                if not png_path:
-                    self.root.after(0, self.update_ui_with_error, f"Failed to convert {page}")
-                    return
-                
-                img = Image.open(png_path)
-            else:
-                img = Image.open(file_path)
-            
-            screen_width = self.root.winfo_screenwidth()
-            available_height = self.root.winfo_screenheight() - self.control_bar_collapsed_height
-            
-            max_dim = (min(screen_width, MAX_IMAGE_DIMENSION), 
-                      min(available_height, MAX_IMAGE_DIMENSION))
-            img.thumbnail(max_dim, Image.LANCZOS)
-            
-            photo = ImageTk.PhotoImage(img)
-            self.image_cache.put(cache_key, photo)
-            self.root.after(0, self.update_ui_with_image, photo)
-        except Exception as e:
-            logger.error(f"Error loading file {file_path}: {e}")
-            self.root.after(0, self.update_ui_with_error, os.path.basename(file_path))
-    
-    def update_ui_with_image(self, photo):
-        self.image_label.config(image=photo, text="")
-        self.image_label.image = photo
-    
-    def update_ui_with_error(self, filename):
-        self.image_label.config(image="", text=f"Error loading:\n{filename}")
-    
-    def load_logo_threaded(self, path):
-        try:
-            img = Image.open(path)
-            w, h = img.size
-            new_height = int((LOGO_WIDTH / float(w)) * h)
-            img = img.resize((LOGO_WIDTH, new_height), Image.LANCZOS)
-            photo = ImageTk.PhotoImage(img)
-            self.root.after(0, self.update_ui_with_logo, photo)
-        except Exception as e:
-            logger.error(f"Error loading logo: {e}")
-    
-    def update_ui_with_logo(self, photo):
-        self.logo_label.config(image=photo)
-        self.logo_label.image = photo
-
-if __name__ == "__main__":
-    root = tk.Tk()
-    app = FullscreenImageApp(root)
-    root.mainloop()
+                sheet_type = page.lower() if page != "Image"
