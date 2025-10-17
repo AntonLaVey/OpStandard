@@ -28,7 +28,22 @@ except Exception as e:
     logger.warning(f"Could not create file logger: {e}")
 
 NETWORK_BASE_PATH = "/mnt/network-drive/TS16949 Work/Standard Operating Procedure"
-DEPARTMENTS = ["11 Injection", "12 Assembly", "13 Paint", "32 Repack", "New Model"]
+DEPARTMENTS = ["11 Injection", "12 Assembly", "13 Paint", "32 Repack", "New Model", "SHOOT AND SHIP"]
+
+# Special department paths (for departments nested within other department folders)
+# Format: "Department Name": "relative/path/from/base"
+# Example: "SHOOT AND SHIP" appears as its own department but lives in 11 Injection folder
+SPECIAL_DEPT_PATHS = {
+    "SHOOT AND SHIP": "11 Injection/SHOOT AND SHIP"
+}
+
+# Folders to exclude when listing models (prevents nested departments from appearing as models)
+# Format: "Parent Department": ["folder1", "folder2"]
+# When "11 Injection" is selected, "SHOOT AND SHIP" won't appear in the model list
+EXCLUDED_MODEL_FOLDERS = {
+    "11 Injection": ["SHOOT AND SHIP"]
+}
+
 SUPPORTED_FORMATS = (".xlsx", ".png", ".jpg", ".jpeg", ".gif", ".bmp")
 LOGO_WIDTH = 175
 IMAGE_CACHE_SIZE = 2
@@ -71,12 +86,24 @@ class ExcelConverter:
         self._check_tools()
     
     def _check_tools(self):
-        """Verify required tools are available"""
-        tools = ["libreoffice", "pdftoppm", "convert"]
+        """Verify required tools are available - checks both 'convert' and 'magick'"""
+        tools_required = ["libreoffice", "pdftoppm"]
+        tools_optional = ["convert", "magick"]
+        
         missing = []
-        for tool in tools:
+        for tool in tools_required:
             if not shutil.which(tool):
                 missing.append(tool)
+        
+        # Check for ImageMagick (either convert or magick)
+        self.imagemagick_cmd = None
+        if shutil.which("convert"):
+            self.imagemagick_cmd = "convert"
+        elif shutil.which("magick"):
+            self.imagemagick_cmd = "magick"
+        else:
+            missing.append("convert/magick")
+        
         if missing:
             logger.error(f"Missing required tools: {', '.join(missing)}")
     
@@ -164,9 +191,14 @@ class ExcelConverter:
         except Exception as e:
             logger.error(f"Error saving metadata: {e}")
     
-    def convert_excel_to_png(self, excel_path, sheet_name):
-        """Convert Excel sheet to PNG"""
+    def convert_excel_to_png(self, excel_path, sheet_name, stop_event=None):
+        """Convert Excel sheet to PNG with optional cancellation support"""
         with self.conversion_lock:
+            # Check if we should stop before starting
+            if stop_event and stop_event.is_set():
+                logger.info("Conversion cancelled before start")
+                return None
+            
             temp_dir = None
             try:
                 cache_path = self.get_cache_path(excel_path, sheet_name)
@@ -174,9 +206,14 @@ class ExcelConverter:
                     logger.info(f"Cache hit: {os.path.basename(cache_path)}")
                     return cache_path
                 
-                logger.info(f"Converting: {os.path.basename(excel_path)}")
+                logger.info(f"Converting: {os.path.basename(excel_path)} - {sheet_name}")
                 sheet_index = self.get_sheet_index(excel_path, sheet_name)
                 if sheet_index is None:
+                    return None
+                
+                # Check stop event before expensive operations
+                if stop_event and stop_event.is_set():
+                    logger.info("Conversion cancelled during processing")
                     return None
                 
                 temp_dir = tempfile.mkdtemp()
@@ -191,6 +228,11 @@ class ExcelConverter:
                     logger.error(f"LibreOffice failed: {result.stderr[:400]}")
                     return None
                 
+                # Check stop event after LibreOffice
+                if stop_event and stop_event.is_set():
+                    logger.info("Conversion cancelled after PDF generation")
+                    return None
+                
                 pdf_files = [f for f in os.listdir(temp_dir) if f.endswith(".pdf")]
                 if not pdf_files:
                     logger.error("No PDF generated")
@@ -203,9 +245,9 @@ class ExcelConverter:
                        "-singlefile", "-r", "150", pdf_path, output_prefix]
                 result = subprocess.run(cmd, capture_output=True, timeout=30, text=True)
                 
-                if result.returncode != 0:
+                if result.returncode != 0 and self.imagemagick_cmd:
                     logger.warning(f"pdftoppm failed: {result.stderr[:400]}, trying ImageMagick")
-                    cmd = ["convert", "-density", "100", f"{pdf_path}[{sheet_index}]", cache_path]
+                    cmd = [self.imagemagick_cmd, "-density", "100", f"{pdf_path}[{sheet_index}]", cache_path]
                     result = subprocess.run(cmd, capture_output=True, timeout=30, text=True)
                     if result.returncode != 0:
                         logger.error(f"ImageMagick failed: {result.stderr[:400]}")
@@ -353,13 +395,15 @@ class FullscreenImageApp:
         self.files_list = []
         self.image_cache = ImageCache()
         self.excel_converter = ExcelConverter()
-        self.stop_fg_precache = threading.Event()
-        self.stop_bg_precache = threading.Event()
-        self.stop_polling = threading.Event()
-        self.precache_thread = None
+        
+        # Thread management with explicit per-thread stop events
+        self.bg_precache_thread = None
+        self.bg_precache_stop = None
         self.fg_precache_thread = None
-        self.bg_stop_event = None
-        self.fg_stop_event = None
+        self.fg_precache_stop = None
+        self.polling_thread = None
+        self.polling_stop = threading.Event()
+        
         self.network_available = False
         
         if DEPARTMENTS:
@@ -418,20 +462,34 @@ class FullscreenImageApp:
     
     def on_close(self):
         logger.info("App closing - setting stop flags")
-        self.stop_fg_precache.set()
-        self.stop_bg_precache.set()
-        self.stop_polling.set()
+        
+        # Stop polling
+        self.polling_stop.set()
+        
+        # Stop background precache
+        if self.bg_precache_stop:
+            self.bg_precache_stop.set()
+        if self.bg_precache_thread and self.bg_precache_thread.is_alive():
+            self.bg_precache_thread.join(timeout=2.0)
+        
+        # Stop foreground precache
+        if self.fg_precache_stop:
+            self.fg_precache_stop.set()
+        if self.fg_precache_thread and self.fg_precache_thread.is_alive():
+            self.fg_precache_thread.join(timeout=2.0)
+        
         self.root.quit()
     
     def start_network_polling(self):
         """Start polling for network drive availability"""
         logger.info("Starting network drive polling")
         self.root.after(0, lambda: self.image_label.config(image="", text="Waiting for network drive...\n(polling every 10 seconds)"))
-        threading.Thread(target=self._poll_network_drive, daemon=True).start()
+        self.polling_thread = threading.Thread(target=self._poll_network_drive, daemon=True)
+        self.polling_thread.start()
     
     def _poll_network_drive(self):
         """Poll network drive every 10 seconds until available"""
-        while not self.stop_polling.is_set():
+        while not self.polling_stop.is_set():
             try:
                 if os.path.exists(NETWORK_BASE_PATH) and os.path.isdir(NETWORK_BASE_PATH):
                     logger.info("Network drive found!")
@@ -445,7 +503,7 @@ class FullscreenImageApp:
                 logger.debug(f"Network poll error: {e}")
             
             for _ in range(100):
-                if self.stop_polling.is_set():
+                if self.polling_stop.is_set():
                     return
                 time.sleep(0.1)
     
@@ -462,33 +520,26 @@ class FullscreenImageApp:
             self.root.after(0, lambda: self.image_label.config(image="", text="Network drive not available"))
             return
         
-        # Stop old background precache thread
-        if self.precache_thread and self.precache_thread.is_alive():
-            self.bg_stop_event.set()
-            self.precache_thread.join(timeout=1.0)
+        # Stop old background precache thread safely
+        if self.bg_precache_stop and self.bg_precache_thread:
+            logger.debug("Stopping old bg precache thread")
+            self.bg_precache_stop.set()
+            self.bg_precache_thread.join(timeout=2.0)
         
         # Start new background precache with fresh stop event
-        self.bg_stop_event = threading.Event()
-        self.precache_thread = threading.Thread(
-            target=self.precache_dept,
-            args=(self.dept_var.get(), self.bg_stop_event),
-            daemon=True
-        )
-        self.precache_thread.start()
+        dept = self.dept_var.get()
+        if dept:
+            logger.info(f"Starting bg precache for {dept}")
+            self.bg_precache_stop = threading.Event()
+            self.bg_precache_thread = threading.Thread(
+                target=self.precache_dept,
+                args=(dept, self.bg_precache_stop),
+                daemon=True
+            )
+            self.bg_precache_thread.start()
         
         if self.is_expanded:
             self.root.after(0, self.reset_collapse_timer)
-    
-    def _bg_precache_starter(self):
-        """Safely start background precache with new Event"""
-        self.stop_bg_precache = threading.Event()
-        if self.precache_thread is None or not self.precache_thread.is_alive():
-            self.precache_thread = threading.Thread(
-                target=self.precache_dept,
-                args=(self.dept_var.get(),),
-                daemon=True
-            )
-            self.precache_thread.start()
     
     def update_models(self):
         dept = self.dept_var.get()
@@ -496,7 +547,11 @@ class FullscreenImageApp:
             self.root.after(0, lambda: self.model_dropdown.__setitem__("values", []))
             return
         
-        dept_path = os.path.join(NETWORK_BASE_PATH, dept)
+        # Check if this is a special department with a custom path
+        if dept in SPECIAL_DEPT_PATHS:
+            dept_path = os.path.join(NETWORK_BASE_PATH, SPECIAL_DEPT_PATHS[dept])
+        else:
+            dept_path = os.path.join(NETWORK_BASE_PATH, dept)
         
         if not os.path.exists(dept_path):
             logger.error(f"Department path not found: {dept_path}")
@@ -505,8 +560,14 @@ class FullscreenImageApp:
             return
         
         try:
-            models = sorted([d for d in os.listdir(dept_path)
-                           if os.path.isdir(os.path.join(dept_path, d))])
+            # Get all subdirectories
+            all_models = [d for d in os.listdir(dept_path)
+                         if os.path.isdir(os.path.join(dept_path, d))]
+            
+            # Filter out excluded folders for this department
+            excluded = EXCLUDED_MODEL_FOLDERS.get(dept, [])
+            models = sorted([m for m in all_models if m not in excluded])
+            
             self.root.after(0, lambda: self.model_dropdown.__setitem__("values", models))
             if models:
                 self.root.after(0, lambda: (self.model_var.set(models[0]), self.on_model_select(None)))
@@ -516,25 +577,27 @@ class FullscreenImageApp:
             self.root.after(0, lambda: self.image_label.config(image="", text="Error reading department"))
     
     def on_model_select(self, event):
-        self.stop_fg_precache.set()
+        # Stop old foreground precache
+        if self.fg_precache_stop and self.fg_precache_thread:
+            logger.debug("Stopping old fg precache thread")
+            self.fg_precache_stop.set()
+            self.fg_precache_thread.join(timeout=1.0)
+        
         self.update_files()
         
-        fg_thread = threading.Thread(target=self._fg_precache_starter, daemon=True)
-        fg_thread.start()
-        
-        if self.is_expanded:
-            self.root.after(0, self.reset_collapse_timer)
-    
-    def _fg_precache_starter(self):
-        """Safely start foreground precache with new Event"""
-        self.stop_fg_precache = threading.Event()
-        if self.fg_precache_thread is None or not self.fg_precache_thread.is_alive():
+        # Start new foreground precache
+        if self.current_model_path:
+            logger.info(f"Starting fg precache for {os.path.basename(self.current_model_path)}")
+            self.fg_precache_stop = threading.Event()
             self.fg_precache_thread = threading.Thread(
                 target=self.precache_model_aggressive,
-                args=(self.current_model_path,),
+                args=(self.current_model_path, self.fg_precache_stop),
                 daemon=True
             )
             self.fg_precache_thread.start()
+        
+        if self.is_expanded:
+            self.root.after(0, self.reset_collapse_timer)
     
     def update_files(self):
         dept = self.dept_var.get()
@@ -544,7 +607,13 @@ class FullscreenImageApp:
             self.files_list = []
             return
         
-        self.current_model_path = os.path.join(NETWORK_BASE_PATH, dept, model)
+        # Check if this is a special department with a custom path
+        if dept in SPECIAL_DEPT_PATHS:
+            dept_path = os.path.join(NETWORK_BASE_PATH, SPECIAL_DEPT_PATHS[dept])
+        else:
+            dept_path = os.path.join(NETWORK_BASE_PATH, dept)
+        
+        self.current_model_path = os.path.join(dept_path, model)
         
         if not os.path.exists(self.current_model_path):
             logger.error(f"Model path not found: {self.current_model_path}")
@@ -615,6 +684,7 @@ class FullscreenImageApp:
             threading.Thread(target=self.load_file, args=(path, page, cache_key), daemon=True).start()
     
     def load_file(self, path, page, cache_key):
+        """Load and display file - FIXED: proper return after error"""
         if path != self.current_file_path:
             logger.info("Skipping load - selection changed")
             return
@@ -623,6 +693,128 @@ class FullscreenImageApp:
             if path.lower().endswith(".xlsx"):
                 sheet_type = page.lower() if page != "Image" else "front"
                 sheet = self.excel_converter.find_sheet(path, sheet_type)
+                
+                # CRITICAL FIX: Added proper return statement
                 if not sheet:
                     if path == self.current_file_path:
                         self.root.after(0, lambda: self.image_label.config(image="", text="Sheet not found"))
+                    return  # FIXED: This return was missing!
+                
+                png_path = self.excel_converter.convert_excel_to_png(path, sheet)
+                if not png_path:
+                    if path == self.current_file_path:
+                        self.root.after(0, lambda: self.image_label.config(image="", text=f"Failed to convert {page}"))
+                    return
+                
+                img = Image.open(png_path)
+            else:
+                img = Image.open(path)
+            
+            screen_width = self.root.winfo_screenwidth()
+            available_height = self.root.winfo_screenheight() - self.control_bar_collapsed_height
+            
+            max_dim = (min(screen_width, MAX_IMAGE_DIMENSION),
+                      min(available_height, MAX_IMAGE_DIMENSION))
+            img.thumbnail(max_dim, Image.LANCZOS)
+            
+            photo = ImageTk.PhotoImage(img)
+            self.image_cache.put(cache_key, photo)
+            
+            if path == self.current_file_path:
+                self.root.after(0, lambda: (self.image_label.config(image=photo, text=""),
+                                           setattr(self.image_label, 'image', photo)))
+        except Exception as e:
+            logger.error(f"Error loading file: {e}")
+            if path == self.current_file_path:
+                self.root.after(0, lambda: self.image_label.config(image="", text=f"Error loading:\n{os.path.basename(path)}"))
+    
+    def precache_dept(self, dept, stop_event):
+        """FIXED: Now accepts stop_event parameter"""
+        logger.info(f"BG precache started for {dept}")
+        
+        # Check if this is a special department with a custom path
+        if dept in SPECIAL_DEPT_PATHS:
+            dept_path = os.path.join(NETWORK_BASE_PATH, SPECIAL_DEPT_PATHS[dept])
+        else:
+            dept_path = os.path.join(NETWORK_BASE_PATH, dept)
+        
+        if not os.path.exists(dept_path):
+            logger.warning(f"Dept path not found: {dept_path}")
+            return
+        
+        try:
+            # Get all model directories
+            all_models = [d for d in os.listdir(dept_path)
+                         if os.path.isdir(os.path.join(dept_path, d))]
+            
+            # Filter out excluded folders for this department
+            excluded = EXCLUDED_MODEL_FOLDERS.get(dept, [])
+            models = [m for m in all_models if m not in excluded]
+            
+            for model in models:
+                if stop_event.is_set():  # FIXED: Using passed stop_event
+                    logger.info("BG precache cancelled")
+                    return
+                
+                model_path = os.path.join(dept_path, model)
+                try:
+                    files = [os.path.join(model_path, f)
+                            for f in os.listdir(model_path)
+                            if f.lower().endswith(".xlsx")]
+                    
+                    for excel_file in files:
+                        if stop_event.is_set():  # FIXED: Using passed stop_event
+                            logger.info("BG precache cancelled")
+                            return
+                        
+                        for sheet_type in ["front", "back"]:
+                            if stop_event.is_set():  # FIXED: Using passed stop_event
+                                return
+                            
+                            sheet = self.excel_converter.find_sheet(excel_file, sheet_type)
+                            if sheet:
+                                logger.debug(f"BG caching: {os.path.basename(excel_file)} - {sheet_type}")
+                                self.excel_converter.convert_excel_to_png(excel_file, sheet, stop_event)
+                except Exception as e:
+                    logger.debug(f"BG precache error in {model}: {e}")
+                    continue
+        except Exception as e:
+            logger.error(f"BG precache error: {e}")
+        
+        logger.info("BG precache complete")
+    
+    def precache_model_aggressive(self, model_path, stop_event):
+        """FIXED: Now accepts stop_event parameter"""
+        logger.info(f"FG precache started for {os.path.basename(model_path)}")
+        
+        if not os.path.exists(model_path):
+            logger.warning(f"Model path not found: {model_path}")
+            return
+        
+        try:
+            files = [os.path.join(model_path, f)
+                    for f in os.listdir(model_path)
+                    if f.lower().endswith(".xlsx")]
+            
+            for excel_file in files:
+                if stop_event.is_set():  # FIXED: Using passed stop_event
+                    logger.info("FG precache cancelled")
+                    return
+                
+                for sheet_type in ["front", "back"]:
+                    if stop_event.is_set():  # FIXED: Using passed stop_event
+                        return
+                    
+                    sheet = self.excel_converter.find_sheet(excel_file, sheet_type)
+                    if sheet:
+                        logger.info(f"FG caching: {os.path.basename(excel_file)} - {sheet_type}")
+                        self.excel_converter.convert_excel_to_png(excel_file, sheet, stop_event)
+        except Exception as e:
+            logger.error(f"FG precache error: {e}")
+        
+        logger.info("FG precache complete")
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = FullscreenImageApp(root)
+    root.mainloop()
