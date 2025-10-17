@@ -444,8 +444,14 @@ class FullscreenImageApp:
             self.model_dropdown["values"] = []
     
     def on_model_select(self, event):
+        # Stop all active precaching immediately
+        self.stop_precache.set()
+        
         self.update_files()
+        
+        # Start fresh precaching for this new model
         if self.fg_precache_thread is None or not self.fg_precache_thread.is_alive():
+            self.stop_precache.clear()
             self.fg_precache_thread = threading.Thread(
                 target=self.precache_model_aggressive,
                 args=(self.current_model_path,),
@@ -506,14 +512,16 @@ class FullscreenImageApp:
             self.reset_collapse_timer()
     
     def display_file(self, path, page):
-        if not path:
+        if not path or path != self.current_file_path:
             return
         
         cache_key = f"{path}_{page}"
         cached = self.image_cache.get(cache_key)
         if cached:
-            self.image_label.config(image=cached, text="")
-            self.image_label.image = cached
+            # Verify this is still the current selection
+            if path == self.current_file_path:
+                self.image_label.config(image=cached, text="")
+                self.image_label.image = cached
         else:
             if path.lower().endswith(".xlsx"):
                 self.image_label.config(image="", text=f"Loading {page}...")
@@ -522,19 +530,32 @@ class FullscreenImageApp:
             threading.Thread(target=self.load_file, args=(path, page, cache_key), daemon=True).start()
     
     def load_file(self, path, page, cache_key):
+        # Verify this is still the current selection before starting work
+        if path != self.current_file_path:
+            logger.info(f"Skipping load - selection changed")
+            return
+        
         try:
             if path.lower().endswith(".xlsx"):
                 sheet_type = page.lower() if page != "Image" else "front"
                 sheet = self.excel_converter.find_sheet(path, sheet_type)
                 if not sheet:
-                    self.root.after(0, lambda: self.image_label.config(image="", text=f"Sheet not found"))
+                    # Verify still current before updating UI
+                    if path == self.current_file_path:
+                        self.root.after(0, lambda: self.image_label.config(image="", text=f"Sheet not found"))
                     return
                 png_path = self.excel_converter.convert_excel_to_png(path, sheet)
                 if not png_path:
-                    self.root.after(0, lambda: self.image_label.config(image="", text="Conversion failed"))
+                    if path == self.current_file_path:
+                        self.root.after(0, lambda: self.image_label.config(image="", text="Conversion failed"))
                     return
             else:
                 png_path = path
+            
+            # Verify still current before loading image
+            if path != self.current_file_path:
+                logger.info(f"Skipping display - selection changed")
+                return
             
             with Image.open(png_path) as img:
                 img_copy = img.copy()
@@ -543,11 +564,15 @@ class FullscreenImageApp:
             img_copy.thumbnail((min(w, MAX_IMAGE_DIMENSION), min(h, MAX_IMAGE_DIMENSION)), Image.LANCZOS)
             photo = ImageTk.PhotoImage(img_copy)
             self.image_cache.put(cache_key, photo)
-            self.root.after(0, lambda: (self.image_label.config(image=photo, text=""),
-                                       setattr(self.image_label, 'image', photo)))
+            
+            # Final check before displaying
+            if path == self.current_file_path:
+                self.root.after(0, lambda: (self.image_label.config(image=photo, text=""),
+                                           setattr(self.image_label, 'image', photo)))
         except Exception as e:
             logger.error(f"Load error: {e}")
-            self.root.after(0, lambda: self.image_label.config(image="", text="Error loading file"))
+            if path == self.current_file_path:
+                self.root.after(0, lambda: self.image_label.config(image="", text="Error loading file"))
     
     def precache_model_aggressive(self, model_path):
         """Aggressively precache current model"""
