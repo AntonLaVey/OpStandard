@@ -341,7 +341,8 @@ class FullscreenImageApp:
         self.files_list = []
         self.image_cache = ImageCache()
         self.excel_converter = ExcelConverter()
-        self.stop_precache = threading.Event()
+        self.stop_fg_precache = threading.Event()  # Separate flag for foreground
+        self.stop_bg_precache = threading.Event()  # Separate flag for background
         self.precache_thread = None
         self.fg_precache_thread = None
         
@@ -408,10 +409,12 @@ class FullscreenImageApp:
         logger.info(f"Department: {self.dept_var.get()}")
         self.update_models()
         
+        # Stop background precache (but not foreground)
+        self.stop_bg_precache.set()
+        
         def start_bg_precache():
-            self.stop_precache.set()
-            time.sleep(0.05)
-            self.stop_precache = threading.Event()
+            time.sleep(0.1)
+            self.stop_bg_precache = threading.Event()
             if self.precache_thread is None or not self.precache_thread.is_alive():
                 self.precache_thread = threading.Thread(
                     target=self.precache_dept,
@@ -444,20 +447,22 @@ class FullscreenImageApp:
             self.model_dropdown["values"] = []
     
     def on_model_select(self, event):
-        # Stop all active precaching immediately
-        self.stop_precache.set()
+        # Stop foreground precache only
+        self.stop_fg_precache.set()
         
         self.update_files()
         
-        # Start fresh precaching for this new model
+        # Start fresh foreground precaching for this new model
         if self.fg_precache_thread is None or not self.fg_precache_thread.is_alive():
-            self.stop_precache.clear()
+            self.stop_fg_precache = threading.Event()
             self.fg_precache_thread = threading.Thread(
                 target=self.precache_model_aggressive,
                 args=(self.current_model_path,),
                 daemon=True
             )
             self.fg_precache_thread.start()
+        
+        # Reset collapse timer on selection
         if self.is_expanded:
             self.reset_collapse_timer()
     
@@ -578,42 +583,56 @@ class FullscreenImageApp:
         """Aggressively precache current model"""
         if not model_path or not os.path.exists(model_path):
             return
-        logger.info(f"Aggressive precache: {os.path.basename(model_path)}")
+        logger.info(f"Aggressive precache START: {os.path.basename(model_path)}")
         try:
             for f in sorted(os.listdir(model_path)):
+                if self.stop_fg_precache.is_set():
+                    logger.info("Aggressive precache STOPPED")
+                    return
                 if f.lower().endswith(".xlsx"):
                     file_path = os.path.join(model_path, f)
                     for sheet_type in ["front", "back"]:
+                        if self.stop_fg_precache.is_set():
+                            return
                         sheet = self.excel_converter.find_sheet(file_path, sheet_type)
                         if sheet:
-                            logger.info(f"Aggressive: {os.path.basename(file_path)} - {sheet_type}")
-                            self.excel_converter.convert_excel_to_png(file_path, sheet)
+                            cache_path = self.excel_converter.get_cache_path(file_path, sheet)
+                            if not self.excel_converter.is_cache_valid(cache_path, file_path):
+                                logger.info(f"Aggressive: {os.path.basename(file_path)} - {sheet_type}")
+                                self.excel_converter.convert_excel_to_png(file_path, sheet)
+                            else:
+                                logger.info(f"Already cached: {os.path.basename(file_path)} - {sheet_type}")
         except Exception as e:
             logger.error(f"Aggressive precache error: {e}")
     
     def precache_dept(self, dept):
         """Slowly precache entire department in background"""
-        logger.info(f"Background precache: {dept}")
+        logger.info(f"Background precache START: {dept}")
         dept_path = os.path.join(NETWORK_BASE_PATH, dept)
         try:
             models = sorted([d for d in os.listdir(dept_path) if os.path.isdir(os.path.join(dept_path, d))])
             for model in models:
-                if self.stop_precache.is_set():
+                if self.stop_bg_precache.is_set():
+                    logger.info("Background precache STOPPED")
                     return
                 model_path = os.path.join(dept_path, model)
                 try:
                     for f in sorted(os.listdir(model_path)):
-                        if self.stop_precache.is_set():
+                        if self.stop_bg_precache.is_set():
                             return
                         if f.lower().endswith(".xlsx"):
                             file_path = os.path.join(model_path, f)
                             for sheet_type in ["front", "back"]:
-                                if self.stop_precache.is_set():
+                                if self.stop_bg_precache.is_set():
                                     return
                                 sheet = self.excel_converter.find_sheet(file_path, sheet_type)
                                 if sheet:
-                                    logger.info(f"Background: {os.path.basename(file_path)} - {sheet_type}")
-                                    self.excel_converter.convert_excel_to_png(file_path, sheet)
+                                    cache_path = self.excel_converter.get_cache_path(file_path, sheet)
+                                    if not self.excel_converter.is_cache_valid(cache_path, file_path):
+                                        logger.info(f"Background: {os.path.basename(file_path)} - {sheet_type}")
+                                        self.excel_converter.convert_excel_to_png(file_path, sheet)
+                                    else:
+                                        logger.info(f"Already cached (bg): {os.path.basename(file_path)} - {sheet_type}")
                                 time.sleep(0.1)
                 except Exception as e:
                     logger.error(f"Background error in {model}: {e}")
