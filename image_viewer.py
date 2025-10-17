@@ -639,50 +639,73 @@ class FullscreenImageApp:
     
     def load_file_threaded(self, file_path, page, cache_key):
         try:
+            logger.info(f"load_file_threaded START: {file_path}, page={page}")
             if file_path.lower().endswith(".xlsx"):
+                logger.info("Processing Excel file")
                 sheet_type = page.lower() if page != "Image" else "front"
+                logger.info(f"Sheet type: {sheet_type}")
                 actual_sheet = self.excel_converter.find_sheet(file_path, sheet_type)
                 
                 if not actual_sheet:
+                    logger.error(f"Could not find sheet: {sheet_type}")
                     self.root.after(0, self.update_ui_with_error, f"Could not find '{page}' sheet")
                     return
                 
+                logger.info(f"Found sheet: {actual_sheet}")
                 png_path = self.excel_converter.convert_excel_to_png(file_path, actual_sheet)
+                logger.info(f"Conversion result: {png_path}")
                 
                 if not png_path:
+                    logger.error("Conversion returned None")
                     self.root.after(0, self.update_ui_with_error, f"Failed to convert {page}")
                     return
                 
                 try:
+                    logger.info(f"Opening PNG: {png_path}")
                     img = Image.open(png_path)
+                    logger.info(f"PNG opened successfully, size: {img.size}")
                 except Exception as e:
-                    logger.error(f"Failed to open PNG: {e}")
+                    logger.error(f"Failed to open PNG: {e}", exc_info=True)
                     self.root.after(0, self.update_ui_with_error, f"Error opening converted image")
                     return
             else:
+                logger.info("Processing regular image file")
                 try:
+                    logger.info(f"Opening image: {file_path}")
                     img = Image.open(file_path)
+                    logger.info(f"Image opened successfully, size: {img.size}")
                 except Exception as e:
-                    logger.error(f"Failed to open image: {e}")
+                    logger.error(f"Failed to open image: {e}", exc_info=True)
                     self.root.after(0, self.update_ui_with_error, os.path.basename(file_path))
                     return
             
             try:
+                logger.info("Getting screen dimensions")
                 screen_width = self.root.winfo_screenwidth()
                 available_height = self.root.winfo_screenheight() - self.control_bar_collapsed_height
+                logger.info(f"Screen: {screen_width}x{available_height}")
                 
                 max_dim = (min(screen_width, MAX_IMAGE_DIMENSION), 
                           min(available_height, MAX_IMAGE_DIMENSION))
+                logger.info(f"Thumbnailing to: {max_dim}")
                 img.thumbnail(max_dim, Image.LANCZOS)
+                logger.info(f"Thumbnail created, new size: {img.size}")
                 
+                logger.info("Creating PhotoImage")
                 photo = ImageTk.PhotoImage(img)
+                logger.info("PhotoImage created successfully")
+                
+                logger.info("Adding to cache")
                 self.image_cache.put(cache_key, photo)
+                logger.info("Cache updated, scheduling UI update")
+                
                 self.root.after(0, self.update_ui_with_image, photo)
+                logger.info("UI update scheduled")
             except Exception as e:
-                logger.error(f"Error processing image: {e}")
+                logger.error(f"Error processing image: {e}", exc_info=True)
                 self.root.after(0, self.update_ui_with_error, "Image processing error")
         except Exception as e:
-            logger.error(f"Error loading file {file_path}: {e}")
+            logger.error(f"Error loading file {file_path}: {e}", exc_info=True)
             self.root.after(0, self.update_ui_with_error, os.path.basename(file_path))
     
     def update_ui_with_image(self, photo):
