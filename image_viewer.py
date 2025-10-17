@@ -1,4 +1,75 @@
-import tkinter as tk
+def load_file(self, path, page, cache_key):
+        try:
+            if path.lower().endswith(".xlsx"):
+                sheet_type = page.lower() if page != "Image" else "front"
+                sheet = self.excel_converter.find_sheet(path, sheet_type)
+                if not sheet:
+                    self.root.after(0, lambda: self.image_label.config(image="", text=f"Sheet not found: {page}"))
+                    return
+                png_path = self.excel_converter.convert_excel_to_png(path, sheet)
+                if not png_path:
+                    self.root.after(0, lambda: self.image_label.config(image="", text=f"Conversion failed"))
+                    return
+                img = Image.open(png_path)
+            else:
+                img = Image.open(path)
+            
+            w, h = self.root.winfo_screenwidth(), self.root.winfo_screenheight() - self.control_bar_collapsed_height
+            img.thumbnail((min(w, MAX_IMAGE_DIMENSION), min(h, MAX_IMAGE_DIMENSION)), Image.LANCZOS)
+            photo = ImageTk.PhotoImage(img)
+            self.image_cache.put(cache_key, photo)
+            self.root.after(0, lambda: (self.image_label.config(image=photo, text=""),
+                                       setattr(self.image_label, 'image', photo)))
+        except Exception as e:
+            logger.error(f"Load error: {e}")
+            self.root.after(0, lambda: self.image_label.config(image="", text=f"Error: {os.path.basename(path)}"))
+    
+    def precache_model_aggressive(self, model_path):
+        """Aggressively precache current model"""
+        logger.info(f"Aggressive precache: {os.path.basename(model_path)}")
+        if not model_path or not os.path.exists(model_path):
+            return
+        try:
+            for f in sorted(os.listdir(model_path)):
+                if f.lower().endswith(".xlsx"):
+                    file_path = os.path.join(model_path, f)
+                    for sheet_type in ["front", "back"]:
+                        sheet = self.excel_converter.find_sheet(file_path, sheet_type)
+                        if sheet:
+                            logger.info(f"Aggressive cache: {os.path.basename(file_path)} - {sheet_type}")
+                            self.excel_converter.convert_excel_to_png(file_path, sheet)
+        except Exception as e:
+            logger.error(f"Aggressive precache error: {e}")
+    
+    def precache_dept(self, dept):
+        """Slowly precache entire department in background"""
+        logger.info(f"Background precaching department: {dept}")
+        dept_path = os.path.join(NETWORK_BASE_PATH, dept)
+        try:
+            models = sorted([d for d in os.listdir(dept_path) if os.path.isdir(os.path.join(dept_path, d))])
+            for model in models:
+                if self.stop_precache.is_set():
+                    return
+                model_path = os.path.join(dept_path, model)
+                logger.info(f"Background precaching model: {model}")
+                try:
+                    for f in sorted(os.listdir(model_path)):
+                        if self.stop_precache.is_set():
+                            return
+                        if f.lower().endswith(".xlsx"):
+                            file_path = os.path.join(model_path, f)
+                            for sheet_type in ["front", "back"]:
+                                if self.stop_precache.is_set():
+                                    return
+                                sheet = self.excel_converter.find_sheet(file_path, sheet_type)
+                                if sheet:
+                                    logger.info(f"Background cache: {os.path.basename(file_path)} - {sheet_type}")
+                                    self.excel_converter.convert_excel_to_png(file_path, sheet)
+                                time.sleep(0.1)
+                except Exception as e:
+                    logger.error(f"Background precache error in {model}: {e}")
+        except Exception as e:
+            logger.error(f"Background precache error: {e}")import tkinter as tk
 from tkinter import ttk
 import os
 from PIL import Image, ImageTk
@@ -359,6 +430,7 @@ class FullscreenImageApp:
         self.excel_converter = ExcelConverter()
         self.stop_precache = threading.Event()
         self.precache_thread = None
+        self.fg_precache_thread = None
         
         # Initialize
         if DEPARTMENTS:
@@ -457,6 +529,14 @@ class FullscreenImageApp:
     
     def on_model_select(self, event):
         self.update_files()
+        # Start aggressive foreground precaching for this model
+        if self.fg_precache_thread is None or not self.fg_precache_thread.is_alive():
+            self.fg_precache_thread = threading.Thread(
+                target=self.precache_model_aggressive,
+                args=(self.current_model_path,),
+                daemon=True
+            )
+            self.fg_precache_thread.start()
         if self.is_expanded:
             self.reset_collapse_timer()
     
@@ -481,6 +561,7 @@ class FullscreenImageApp:
         except Exception as e:
             logger.error(f"Error listing files: {e}")
             self.file_dropdown["values"] = []
+            self.files_list = []
     
     def on_file_select(self, event):
         name = self.file_var.get()
