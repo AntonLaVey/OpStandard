@@ -115,6 +115,7 @@ class ExcelConverter:
             return None
     
     def convert_excel_to_png(self, excel_path, sheet_name):
+        temp_dir = None
         try:
             cache_path = self.get_cache_path(excel_path, sheet_name)
             if self.is_cache_valid(cache_path):
@@ -127,19 +128,19 @@ class ExcelConverter:
                 return None
             
             temp_dir = tempfile.mkdtemp()
+            logger.info(f"Created temp dir: {temp_dir}")
             
             try:
-                # Direct conversion to PNG - much faster than PDF intermediate
                 output_prefix = cache_path.replace(".png", "")
                 cmd = ["libreoffice", "--headless", "--invisible", "--nocrashreport", 
                        "--nodefault", "--nofirststartwizard", "--nologo", "--norestore",
                        "--convert-to", "pdf", "--outdir", temp_dir, excel_path]
                 
                 logger.info("Starting LibreOffice conversion...")
-                result = subprocess.run(cmd, capture_output=True, timeout=45)
+                result = subprocess.run(cmd, capture_output=True, timeout=45, text=True)
                 
                 if result.returncode != 0:
-                    logger.error(f"LibreOffice conversion failed: {result.stderr.decode()}")
+                    logger.error(f"LibreOffice conversion failed: {result.stderr}")
                     return None
                 
                 pdf_files = [f for f in os.listdir(temp_dir) if f.endswith(".pdf")]
@@ -149,32 +150,45 @@ class ExcelConverter:
                 
                 pdf_path = os.path.join(temp_dir, pdf_files[0])
                 pdf_page = sheet_index + 1
-                logger.info(f"PDF created, extracting page {pdf_page} with pdftoppm...")
+                logger.info(f"PDF created at {pdf_path}, extracting page {pdf_page}...")
                 
-                # Use pdftoppm with lower density for speed
                 cmd = ["pdftoppm", "-png", "-f", str(pdf_page), "-l", str(pdf_page), 
                        "-singlefile", "-r", "150", pdf_path, output_prefix]
-                result = subprocess.run(cmd, capture_output=True, timeout=30)
+                result = subprocess.run(cmd, capture_output=True, timeout=30, text=True)
                 
                 if result.returncode != 0:
-                    logger.warning(f"pdftoppm failed: {result.stderr.decode()}")
+                    logger.warning(f"pdftoppm failed: {result.stderr}")
                     logger.info("Trying ImageMagick fallback...")
                     cmd = ["convert", "-density", "100", f"{pdf_path}[{sheet_index}]", cache_path]
-                    result = subprocess.run(cmd, capture_output=True, timeout=30)
+                    result = subprocess.run(cmd, capture_output=True, timeout=30, text=True)
                     if result.returncode != 0:
-                        logger.error(f"ImageMagick also failed: {result.stderr.decode()}")
+                        logger.error(f"ImageMagick also failed: {result.stderr}")
                         return None
                 
                 if os.path.exists(cache_path):
                     logger.info(f"Successfully converted to PNG: {cache_path}")
                     return cache_path
+                else:
+                    logger.error("PNG file was not created")
+                    return None
+            except subprocess.TimeoutExpired:
+                logger.error("Conversion timed out")
                 return None
-            finally:
-                shutil.rmtree(temp_dir, ignore_errors=True)
-                gc.collect()
+            except Exception as e:
+                logger.error(f"Conversion step error: {e}")
+                return None
         except Exception as e:
             logger.error(f"Conversion error: {e}")
             return None
+        finally:
+            if temp_dir and os.path.exists(temp_dir):
+                try:
+                    logger.info(f"Cleaning up temp dir: {temp_dir}")
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                    time.sleep(0.1)  # Give OS time to release resources
+                except Exception as e:
+                    logger.error(f"Failed to clean temp dir: {e}")
+            gc.collect()
 
 class MediaWatcher:
     def __init__(self, callback, base_path=USB_BASE_PATH):
