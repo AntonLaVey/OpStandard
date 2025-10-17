@@ -631,20 +631,34 @@ class FullscreenImageApp:
                     self.root.after(0, self.update_ui_with_error, f"Failed to convert {page}")
                     return
                 
-                img = Image.open(png_path)
+                try:
+                    img = Image.open(png_path)
+                except Exception as e:
+                    logger.error(f"Failed to open PNG: {e}")
+                    self.root.after(0, self.update_ui_with_error, f"Error opening converted image")
+                    return
             else:
-                img = Image.open(file_path)
+                try:
+                    img = Image.open(file_path)
+                except Exception as e:
+                    logger.error(f"Failed to open image: {e}")
+                    self.root.after(0, self.update_ui_with_error, os.path.basename(file_path))
+                    return
             
-            screen_width = self.root.winfo_screenwidth()
-            available_height = self.root.winfo_screenheight() - self.control_bar_collapsed_height
-            
-            max_dim = (min(screen_width, MAX_IMAGE_DIMENSION), 
-                      min(available_height, MAX_IMAGE_DIMENSION))
-            img.thumbnail(max_dim, Image.LANCZOS)
-            
-            photo = ImageTk.PhotoImage(img)
-            self.image_cache.put(cache_key, photo)
-            self.root.after(0, self.update_ui_with_image, photo)
+            try:
+                screen_width = self.root.winfo_screenwidth()
+                available_height = self.root.winfo_screenheight() - self.control_bar_collapsed_height
+                
+                max_dim = (min(screen_width, MAX_IMAGE_DIMENSION), 
+                          min(available_height, MAX_IMAGE_DIMENSION))
+                img.thumbnail(max_dim, Image.LANCZOS)
+                
+                photo = ImageTk.PhotoImage(img)
+                self.image_cache.put(cache_key, photo)
+                self.root.after(0, self.update_ui_with_image, photo)
+            except Exception as e:
+                logger.error(f"Error processing image: {e}")
+                self.root.after(0, self.update_ui_with_error, "Image processing error")
         except Exception as e:
             logger.error(f"Error loading file {file_path}: {e}")
             self.root.after(0, self.update_ui_with_error, os.path.basename(file_path))
