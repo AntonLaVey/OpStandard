@@ -126,17 +126,20 @@ class ExcelConverter:
             if sheet_index is None:
                 return None
             
-            pdf_page = sheet_index + 1
             temp_dir = tempfile.mkdtemp()
             
             try:
+                # Direct conversion to PNG - much faster than PDF intermediate
+                output_prefix = cache_path.replace(".png", "")
                 cmd = ["libreoffice", "--headless", "--invisible", "--nocrashreport", 
                        "--nodefault", "--nofirststartwizard", "--nologo", "--norestore",
-                       "--convert-to", "pdf:writer_pdf_Export", "--outdir", temp_dir, excel_path]
-                result = subprocess.run(cmd, capture_output=True, timeout=60)
+                       "--convert-to", "pdf", "--outdir", temp_dir, excel_path]
+                
+                logger.info("Starting LibreOffice conversion...")
+                result = subprocess.run(cmd, capture_output=True, timeout=45)
                 
                 if result.returncode != 0:
-                    logger.error("LibreOffice conversion failed")
+                    logger.error(f"LibreOffice conversion failed: {result.stderr.decode()}")
                     return None
                 
                 pdf_files = [f for f in os.listdir(temp_dir) if f.endswith(".pdf")]
@@ -145,17 +148,22 @@ class ExcelConverter:
                     return None
                 
                 pdf_path = os.path.join(temp_dir, pdf_files[0])
-                logger.info(f"PDF created, extracting page {pdf_page}")
+                pdf_page = sheet_index + 1
+                logger.info(f"PDF created, extracting page {pdf_page} with pdftoppm...")
                 
-                output_prefix = cache_path.replace(".png", "")
+                # Use pdftoppm with lower density for speed
                 cmd = ["pdftoppm", "-png", "-f", str(pdf_page), "-l", str(pdf_page), 
-                       "-singlefile", "-scale-to", "1920", pdf_path, output_prefix]
+                       "-singlefile", "-r", "150", pdf_path, output_prefix]
                 result = subprocess.run(cmd, capture_output=True, timeout=30)
                 
                 if result.returncode != 0:
-                    logger.warning("pdftoppm failed, trying ImageMagick")
-                    cmd = ["convert", "-density", "150", f"{pdf_path}[{sheet_index}]", cache_path]
-                    subprocess.run(cmd, capture_output=True, timeout=30)
+                    logger.warning(f"pdftoppm failed: {result.stderr.decode()}")
+                    logger.info("Trying ImageMagick fallback...")
+                    cmd = ["convert", "-density", "100", f"{pdf_path}[{sheet_index}]", cache_path]
+                    result = subprocess.run(cmd, capture_output=True, timeout=30)
+                    if result.returncode != 0:
+                        logger.error(f"ImageMagick also failed: {result.stderr.decode()}")
+                        return None
                 
                 if os.path.exists(cache_path):
                     logger.info(f"Successfully converted to PNG: {cache_path}")
