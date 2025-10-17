@@ -402,8 +402,16 @@ class FullscreenImageApp:
     
     def on_close(self):
         logger.info("App closing")
-        self.stop_precache.set()
-        self.root.destroy()
+        # Signal all threads to stop
+        self.stop_fg_precache.set()
+        self.stop_bg_precache.set()
+        
+        # Don't wait - just destroy the window immediately
+        # Daemon threads will be killed when main thread exits
+        try:
+            self.root.destroy()
+        except Exception as e:
+            logger.error(f"Error during close: {e}")
     
     def on_dept_select(self, event):
         logger.info(f"Department: {self.dept_var.get()}")
@@ -622,17 +630,24 @@ class FullscreenImageApp:
                     return
                 if f.lower().endswith(".xlsx"):
                     file_path = os.path.join(model_path, f)
+                    if self.stop_fg_precache.is_set():
+                        return
                     for sheet_type in ["front", "back"]:
                         if self.stop_fg_precache.is_set():
                             return
-                        sheet = self.excel_converter.find_sheet(file_path, sheet_type)
-                        if sheet:
-                            cache_path = self.excel_converter.get_cache_path(file_path, sheet)
-                            if not self.excel_converter.is_cache_valid(cache_path, file_path):
-                                logger.info(f"Aggressive: {os.path.basename(file_path)} - {sheet_type}")
-                                self.excel_converter.convert_excel_to_png(file_path, sheet)
-                            else:
-                                logger.info(f"Already cached: {os.path.basename(file_path)} - {sheet_type}")
+                        try:
+                            sheet = self.excel_converter.find_sheet(file_path, sheet_type)
+                            if sheet:
+                                cache_path = self.excel_converter.get_cache_path(file_path, sheet)
+                                if not self.excel_converter.is_cache_valid(cache_path, file_path):
+                                    logger.info(f"Aggressive: {os.path.basename(file_path)} - {sheet_type}")
+                                    self.excel_converter.convert_excel_to_png(file_path, sheet)
+                                else:
+                                    logger.info(f"Already cached: {os.path.basename(file_path)} - {sheet_type}")
+                        except Exception as e:
+                            logger.error(f"Error in aggressive precache: {e}")
+                            if self.stop_fg_precache.is_set():
+                                return
         except Exception as e:
             logger.error(f"Aggressive precache error: {e}")
     
@@ -653,18 +668,25 @@ class FullscreenImageApp:
                             return
                         if f.lower().endswith(".xlsx"):
                             file_path = os.path.join(model_path, f)
+                            if self.stop_bg_precache.is_set():
+                                return
                             for sheet_type in ["front", "back"]:
                                 if self.stop_bg_precache.is_set():
                                     return
-                                sheet = self.excel_converter.find_sheet(file_path, sheet_type)
-                                if sheet:
-                                    cache_path = self.excel_converter.get_cache_path(file_path, sheet)
-                                    if not self.excel_converter.is_cache_valid(cache_path, file_path):
-                                        logger.info(f"Background: {os.path.basename(file_path)} - {sheet_type}")
-                                        self.excel_converter.convert_excel_to_png(file_path, sheet)
-                                    else:
-                                        logger.info(f"Already cached (bg): {os.path.basename(file_path)} - {sheet_type}")
-                                time.sleep(0.1)
+                                try:
+                                    sheet = self.excel_converter.find_sheet(file_path, sheet_type)
+                                    if sheet:
+                                        cache_path = self.excel_converter.get_cache_path(file_path, sheet)
+                                        if not self.excel_converter.is_cache_valid(cache_path, file_path):
+                                            logger.info(f"Background: {os.path.basename(file_path)} - {sheet_type}")
+                                            self.excel_converter.convert_excel_to_png(file_path, sheet)
+                                        else:
+                                            logger.info(f"Already cached (bg): {os.path.basename(file_path)} - {sheet_type}")
+                                    time.sleep(0.1)
+                                except Exception as e:
+                                    logger.error(f"Error in background precache: {e}")
+                                    if self.stop_bg_precache.is_set():
+                                        return
                 except Exception as e:
                     logger.error(f"Background error in {model}: {e}")
         except Exception as e:
