@@ -76,7 +76,7 @@ def precache_excel_files(self, folder_path):
                             except Exception as e:
                                 logger.error(f"Error precaching {excel_file}: {e}")
                             
-                            time.sleep(0.5)  # Small delay between conversions
+                            time.sleep(0.5)
                 
                 except Exception as e:
                     logger.error(f"Error processing part model {part_model}: {e}")
@@ -449,7 +449,7 @@ class FullscreenImageApp:
         # Initialize by setting first department
         if DEPARTMENTS:
             self.department_variable.set(DEPARTMENTS[0])
-            self.on_department_select(None)
+            self.root.after(100, lambda: self.on_department_select(None))
         
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
     
