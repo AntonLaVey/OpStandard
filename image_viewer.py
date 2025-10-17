@@ -92,15 +92,62 @@ class ExcelConverter:
             logger.error(f"Error reading sheet names: {e}")
             return None
     
-    def is_cache_valid(self, cache_path):
+    def is_cache_valid(self, cache_path, source_excel_path=None):
+        """Check if cache is valid by comparing:
+        1. Source Excel file modification time (auto-refresh if modified)
+        2. Cache file age (fallback refresh after 7 days)
+        """
         if not os.path.exists(cache_path):
             return False
-        file_age = datetime.now() - datetime.fromtimestamp(os.path.getmtime(cache_path))
-        return file_age < timedelta(days=CACHE_STALE_DAYS)
+        
+        # Check if source Excel was modified since cache was created
+        if source_excel_path and os.path.exists(source_excel_path):
+            try:
+                # Get source Excel modification time
+                excel_mod_time = os.path.getmtime(source_excel_path)
+                
+                # Get cached metadata (if it exists)
+                meta_path = cache_path.replace(".png", ".meta")
+                if os.path.exists(meta_path):
+                    with open(meta_path, 'r') as f:
+                        cached_excel_mod_time = float(f.read().strip())
+                    
+                    # If Excel was modified after cache was created, cache is stale
+                    if excel_mod_time > cached_excel_mod_time:
+                        logger.info(f"Excel file modified, cache is stale: {source_excel_path}")
+                        return False
+            except Exception as e:
+                logger.error(f"Error checking cache validity: {e}")
+        
+        # Check if cache PNG is older than 7 days (fallback refresh)
+        try:
+            file_age = datetime.now() - datetime.fromtimestamp(os.path.getmtime(cache_path))
+            is_stale = file_age >= timedelta(days=CACHE_STALE_DAYS)
+            if is_stale:
+                logger.info(f"Cache file older than {CACHE_STALE_DAYS} days, refreshing")
+            return not is_stale
+        except Exception as e:
+            logger.error(f"Error checking cache age: {e}")
+            return False
+    
+    def save_cache_metadata(self, cache_path, source_excel_path):
+        """Save source Excel mod time to metadata file"""
+        try:
+            excel_mod_time = os.path.getmtime(source_excel_path)
+            meta_path = cache_path.replace(".png", ".meta")
+            with open(meta_path, 'w') as f:
+                f.write(str(excel_mod_time))
+            logger.info(f"Saved cache metadata for {cache_path}")
+        except Exception as e:
+            logger.error(f"Error saving cache metadata: {e}")
     
     def get_cache_path(self, excel_path, sheet_name):
         safe_name = f"{os.path.basename(excel_path)}_{sheet_name}".replace(" ", "_")
         return os.path.join(self.cache_dir, f"{safe_name}.png")
+    
+    def get_cache_metadata_path(self, cache_png_path):
+        """Get path to metadata file that tracks source Excel mod time"""
+        return cache_png_path.replace(".png", ".meta")
     
     def get_sheet_index(self, excel_path, sheet_name):
         try:
@@ -168,6 +215,7 @@ class ExcelConverter:
                 
                 if os.path.exists(cache_path):
                     logger.info(f"Successfully converted to PNG: {cache_path}")
+                    self.save_cache_metadata(cache_path, excel_path)
                     return cache_path
                 else:
                     logger.error("PNG file was not created")
