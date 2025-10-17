@@ -407,7 +407,18 @@ class FullscreenImageApp:
     
     def on_dept_select(self, event):
         logger.info(f"Department: {self.dept_var.get()}")
-        self.update_models()
+        
+        # Run network operations in background thread to avoid blocking UI
+        threading.Thread(target=self._dept_select_worker, daemon=True).start()
+    
+    def _dept_select_worker(self):
+        """Background worker for department selection"""
+        try:
+            self.update_models()
+        except Exception as e:
+            logger.error(f"Error updating models: {e}")
+            self.root.after(0, lambda: self.image_label.config(image="", text="Network drive not available"))
+            return
         
         # Stop background precache (but not foreground)
         self.stop_bg_precache.set()
@@ -426,7 +437,7 @@ class FullscreenImageApp:
         threading.Thread(target=start_bg_precache, daemon=True).start()
         
         if self.is_expanded:
-            self.reset_collapse_timer()
+            self.root.after(0, self.reset_collapse_timer)
     
     def update_models(self):
         dept = self.dept_var.get()
@@ -435,16 +446,24 @@ class FullscreenImageApp:
             return
         
         dept_path = os.path.join(NETWORK_BASE_PATH, dept)
+        
+        # Check if path exists
+        if not os.path.exists(dept_path):
+            logger.error(f"Department path not found: {dept_path}")
+            self.model_dropdown["values"] = []
+            self.root.after(0, lambda: self.image_label.config(image="", text="Department not accessible"))
+            return
+        
         try:
             models = sorted([d for d in os.listdir(dept_path)
                            if os.path.isdir(os.path.join(dept_path, d))])
-            self.model_dropdown["values"] = models
+            self.root.after(0, lambda: self.model_dropdown.__setitem__("values", models))
             if models:
-                self.model_var.set(models[0])
-                self.on_model_select(None)
+                self.root.after(0, lambda: (self.model_var.set(models[0]), self.on_model_select(None)))
         except Exception as e:
             logger.error(f"Error listing models: {e}")
-            self.model_dropdown["values"] = []
+            self.root.after(0, lambda: self.model_dropdown.__setitem__("values", []))
+            self.root.after(0, lambda: self.image_label.config(image="", text="Error reading department"))
     
     def on_model_select(self, event):
         # Stop foreground precache only
@@ -475,6 +494,15 @@ class FullscreenImageApp:
             return
         
         self.current_model_path = os.path.join(NETWORK_BASE_PATH, dept, model)
+        
+        # Check if path exists
+        if not os.path.exists(self.current_model_path):
+            logger.error(f"Model path not found: {self.current_model_path}")
+            self.file_dropdown["values"] = []
+            self.files_list = []
+            self.root.after(0, lambda: self.image_label.config(image="", text="Model not accessible"))
+            return
+        
         try:
             self.files_list = sorted([os.path.join(self.current_model_path, f)
                                      for f in os.listdir(self.current_model_path)
@@ -485,10 +513,13 @@ class FullscreenImageApp:
             if names:
                 self.file_var.set(names[0])
                 self.on_file_select(None)
+            else:
+                self.root.after(0, lambda: self.image_label.config(image="", text="No files found"))
         except Exception as e:
             logger.error(f"Error listing files: {e}")
             self.file_dropdown["values"] = []
             self.files_list = []
+            self.root.after(0, lambda: self.image_label.config(image="", text="Error reading files"))
     
     def on_file_select(self, event):
         name = self.file_var.get()
