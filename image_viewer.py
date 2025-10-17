@@ -1,30 +1,4 @@
-def start_network_polling(self):
-        """Start polling for network drive availability"""
-        logger.info("Starting network drive polling")
-        self.image_label.config(image="", text="Waiting for network drive...\n(polling every 10 seconds)")
-        threading.Thread(target=self._poll_network_drive, daemon=True).start()
-    
-    def _poll_network_drive(self):
-        """Poll network drive every 10 seconds until available"""
-        while not self.stop_polling.is_set():
-            try:
-                # Check if network path exists and is accessible
-                if os.path.exists(NETWORK_BASE_PATH) and os.path.isdir(NETWORK_BASE_PATH):
-                    logger.info("Network drive found!")
-                    self.network_available = True
-                    self.root.after(0, lambda: self.on_dept_select(None))
-                    return
-                else:
-                    logger.info("Network drive not available yet, retrying...")
-                    self.image_label.config(image="", text="Waiting for network drive...\n(polling every 10 seconds)")
-            except Exception as e:
-                logger.debug(f"Network poll error: {e}")
-            
-            # Wait 10 seconds before trying again
-            for _ in range(100):  # 10 seconds in 100ms increments
-                if self.stop_polling.is_set():
-                    return
-                time.sleep(0.1)import tkinter as tk
+import tkinter as tk
 from tkinter import ttk
 import os
 import threading
@@ -37,6 +11,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 import gc
 import re
+import hashlib
 from PIL import Image, ImageTk
 
 LOG_FILE = "/var/log/pi-photo-viewer/app.log"
@@ -93,10 +68,22 @@ class ExcelConverter:
         self.cache_dir = cache_dir
         self.conversion_lock = threading.Lock()
         os.makedirs(cache_dir, exist_ok=True)
+        self._check_tools()
+    
+    def _check_tools(self):
+        """Verify required tools are available"""
+        tools = ["libreoffice", "pdftoppm", "convert"]
+        missing = []
+        for tool in tools:
+            if not shutil.which(tool):
+                missing.append(tool)
+        if missing:
+            logger.error(f"Missing required tools: {', '.join(missing)}")
     
     def sanitize_filename(self, name):
-        """Remove unsafe characters from filename"""
-        return re.sub(r'[<>:"/\\|?*]', '_', name)[:100]
+        """Remove unsafe characters and add hash for uniqueness"""
+        safe = re.sub(r'[<>:"/\\|?*]', '_', name)[:80]
+        return safe
     
     def find_sheet(self, excel_path, sheet_type):
         try:
@@ -116,9 +103,10 @@ class ExcelConverter:
             return None
     
     def get_cache_path(self, excel_path, sheet_name):
-        """Generate safe cache filename"""
+        """Generate safe cache filename with hash"""
         safe_name = self.sanitize_filename(f"{os.path.basename(excel_path)}_{sheet_name}")
-        return os.path.join(self.cache_dir, f"{safe_name}.png")
+        content_hash = hashlib.sha1(f"{excel_path}_{sheet_name}".encode()).hexdigest()[:8]
+        return os.path.join(self.cache_dir, f"{safe_name}_{content_hash}.png")
     
     def get_meta_path(self, cache_png_path):
         """Get metadata file path"""
@@ -194,32 +182,33 @@ class ExcelConverter:
                 temp_dir = tempfile.mkdtemp()
                 output_prefix = os.path.splitext(cache_path)[0]
                 
-                # LibreOffice conversion
                 cmd = ["libreoffice", "--headless", "--invisible", "--nocrashreport",
                        "--nodefault", "--nofirststartwizard", "--nologo", "--norestore",
                        "--convert-to", "pdf", "--outdir", temp_dir, excel_path]
                 result = subprocess.run(cmd, capture_output=True, timeout=45, text=True)
                 
                 if result.returncode != 0:
-                    logger.error(f"LibreOffice failed")
+                    logger.error(f"LibreOffice failed: {result.stderr[:400]}")
                     return None
                 
                 pdf_files = [f for f in os.listdir(temp_dir) if f.endswith(".pdf")]
                 if not pdf_files:
+                    logger.error("No PDF generated")
                     return None
                 
                 pdf_path = os.path.join(temp_dir, pdf_files[0])
                 pdf_page = sheet_index + 1
                 
-                # PDF to PNG
                 cmd = ["pdftoppm", "-png", "-f", str(pdf_page), "-l", str(pdf_page),
                        "-singlefile", "-r", "150", pdf_path, output_prefix]
                 result = subprocess.run(cmd, capture_output=True, timeout=30, text=True)
                 
                 if result.returncode != 0:
+                    logger.warning(f"pdftoppm failed: {result.stderr[:400]}, trying ImageMagick")
                     cmd = ["convert", "-density", "100", f"{pdf_path}[{sheet_index}]", cache_path]
                     result = subprocess.run(cmd, capture_output=True, timeout=30, text=True)
                     if result.returncode != 0:
+                        logger.error(f"ImageMagick failed: {result.stderr[:400]}")
                         return None
                 
                 if os.path.exists(cache_path):
@@ -299,7 +288,6 @@ class FullscreenImageApp:
         self.front_button.pack(side="left", expand=True, fill="both", padx=(0, 10))
         self.back_button.pack(side="left", expand=True, fill="both")
         
-        # Row 1: Department and Part Model
         row1 = tk.Frame(self.expanded_container, bg="#1F2937")
         row1.pack(fill="x", pady=(0, 10))
         
@@ -322,7 +310,6 @@ class FullscreenImageApp:
         self.model_dropdown.pack(side="left", expand=True, fill="both")
         self.model_dropdown.bind("<<ComboboxSelected>>", self.on_model_select)
         
-        # Row 2: File
         row2 = tk.Frame(self.expanded_container, bg="#1F2937")
         row2.pack(fill="x", pady=(0, 10))
         
@@ -335,7 +322,6 @@ class FullscreenImageApp:
         self.file_dropdown.pack(side="left", expand=True, fill="both")
         self.file_dropdown.bind("<<ComboboxSelected>>", self.on_file_select)
         
-        # Row 3: Page buttons
         row3 = tk.Frame(self.expanded_container, bg="#1F2937")
         row3.pack(fill="x")
         tk.Label(row3, text="Page:", bg="#1F2937", fg="#06B6D4",
@@ -367,14 +353,15 @@ class FullscreenImageApp:
         self.files_list = []
         self.image_cache = ImageCache()
         self.excel_converter = ExcelConverter()
-        self.stop_fg_precache = threading.Event()  # Separate flag for foreground
-        self.stop_bg_precache = threading.Event()  # Separate flag for background
+        self.stop_fg_precache = threading.Event()
+        self.stop_bg_precache = threading.Event()
+        self.stop_polling = threading.Event()
         self.precache_thread = None
         self.fg_precache_thread = None
+        self.network_available = False
         
         if DEPARTMENTS:
             self.dept_var.set(DEPARTMENTS[0])
-            # Start polling for network drive instead of immediate connect
             self.start_network_polling()
         
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -428,20 +415,40 @@ class FullscreenImageApp:
             self.reset_collapse_timer()
     
     def on_close(self):
-        logger.info("App closing")
-        # Signal all threads to stop
+        logger.info("App closing - setting stop flags")
         self.stop_fg_precache.set()
         self.stop_bg_precache.set()
         self.stop_polling.set()
-        # Give threads a moment to exit
-        time.sleep(0.2)
-        # Force exit
-        os._exit(0)
+        self.root.quit()
+    
+    def start_network_polling(self):
+        """Start polling for network drive availability"""
+        logger.info("Starting network drive polling")
+        self.root.after(0, lambda: self.image_label.config(image="", text="Waiting for network drive...\n(polling every 10 seconds)"))
+        threading.Thread(target=self._poll_network_drive, daemon=True).start()
+    
+    def _poll_network_drive(self):
+        """Poll network drive every 10 seconds until available"""
+        while not self.stop_polling.is_set():
+            try:
+                if os.path.exists(NETWORK_BASE_PATH) and os.path.isdir(NETWORK_BASE_PATH):
+                    logger.info("Network drive found!")
+                    self.network_available = True
+                    self.root.after(0, lambda: self.on_dept_select(None))
+                    return
+                else:
+                    logger.debug("Network drive not available yet")
+                    self.root.after(0, lambda: self.image_label.config(image="", text="Waiting for network drive...\n(polling every 10 seconds)"))
+            except Exception as e:
+                logger.debug(f"Network poll error: {e}")
+            
+            for _ in range(100):
+                if self.stop_polling.is_set():
+                    return
+                time.sleep(0.1)
     
     def on_dept_select(self, event):
         logger.info(f"Department: {self.dept_var.get()}")
-        
-        # Run network operations in background thread to avoid blocking UI
         threading.Thread(target=self._dept_select_worker, daemon=True).start()
     
     def _dept_select_worker(self):
@@ -453,37 +460,36 @@ class FullscreenImageApp:
             self.root.after(0, lambda: self.image_label.config(image="", text="Network drive not available"))
             return
         
-        # Stop background precache (but not foreground)
         self.stop_bg_precache.set()
-        
-        def start_bg_precache():
-            time.sleep(0.1)
-            self.stop_bg_precache = threading.Event()
-            if self.precache_thread is None or not self.precache_thread.is_alive():
-                self.precache_thread = threading.Thread(
-                    target=self.precache_dept,
-                    args=(self.dept_var.get(),),
-                    daemon=True
-                )
-                self.precache_thread.start()
-        
-        threading.Thread(target=start_bg_precache, daemon=True).start()
+        time.sleep(0.05)
+        bg_thread = threading.Thread(target=self._bg_precache_starter, daemon=True)
+        bg_thread.start()
         
         if self.is_expanded:
             self.root.after(0, self.reset_collapse_timer)
     
+    def _bg_precache_starter(self):
+        """Safely start background precache with new Event"""
+        self.stop_bg_precache = threading.Event()
+        if self.precache_thread is None or not self.precache_thread.is_alive():
+            self.precache_thread = threading.Thread(
+                target=self.precache_dept,
+                args=(self.dept_var.get(),),
+                daemon=True
+            )
+            self.precache_thread.start()
+    
     def update_models(self):
         dept = self.dept_var.get()
         if not dept:
-            self.model_dropdown["values"] = []
+            self.root.after(0, lambda: self.model_dropdown.__setitem__("values", []))
             return
         
         dept_path = os.path.join(NETWORK_BASE_PATH, dept)
         
-        # Check if path exists
         if not os.path.exists(dept_path):
             logger.error(f"Department path not found: {dept_path}")
-            self.model_dropdown["values"] = []
+            self.root.after(0, lambda: self.model_dropdown.__setitem__("values", []))
             self.root.after(0, lambda: self.image_label.config(image="", text="Department not accessible"))
             return
         
@@ -499,24 +505,25 @@ class FullscreenImageApp:
             self.root.after(0, lambda: self.image_label.config(image="", text="Error reading department"))
     
     def on_model_select(self, event):
-        # Stop foreground precache only
         self.stop_fg_precache.set()
-        
         self.update_files()
         
-        # Start fresh foreground precaching for this new model
+        fg_thread = threading.Thread(target=self._fg_precache_starter, daemon=True)
+        fg_thread.start()
+        
+        if self.is_expanded:
+            self.root.after(0, self.reset_collapse_timer)
+    
+    def _fg_precache_starter(self):
+        """Safely start foreground precache with new Event"""
+        self.stop_fg_precache = threading.Event()
         if self.fg_precache_thread is None or not self.fg_precache_thread.is_alive():
-            self.stop_fg_precache = threading.Event()
             self.fg_precache_thread = threading.Thread(
                 target=self.precache_model_aggressive,
                 args=(self.current_model_path,),
                 daemon=True
             )
             self.fg_precache_thread.start()
-        
-        # Reset collapse timer on selection
-        if self.is_expanded:
-            self.reset_collapse_timer()
     
     def update_files(self):
         dept = self.dept_var.get()
@@ -528,7 +535,6 @@ class FullscreenImageApp:
         
         self.current_model_path = os.path.join(NETWORK_BASE_PATH, dept, model)
         
-        # Check if path exists
         if not os.path.exists(self.current_model_path):
             logger.error(f"Model path not found: {self.current_model_path}")
             self.file_dropdown["values"] = []
@@ -564,7 +570,7 @@ class FullscreenImageApp:
                 self.current_file_path = f
                 break
         else:
-            self.image_label.config(image="", text="File not found")
+            self.root.after(0, lambda: self.image_label.config(image="", text="File not found"))
             return
         
         if self.current_file_path.lower().endswith(".xlsx"):
@@ -587,21 +593,19 @@ class FullscreenImageApp:
         cache_key = f"{path}_{page}"
         cached = self.image_cache.get(cache_key)
         if cached:
-            # Verify this is still the current selection
             if path == self.current_file_path:
-                self.image_label.config(image=cached, text="")
-                self.image_label.image = cached
+                self.root.after(0, lambda: (self.image_label.config(image=cached, text=""),
+                                           setattr(self.image_label, 'image', cached)))
         else:
             if path.lower().endswith(".xlsx"):
-                self.image_label.config(image="", text=f"Loading {page}...")
+                self.root.after(0, lambda: self.image_label.config(image="", text=f"Loading {page}..."))
             else:
-                self.image_label.config(image="", text="Loading...")
+                self.root.after(0, lambda: self.image_label.config(image="", text="Loading..."))
             threading.Thread(target=self.load_file, args=(path, page, cache_key), daemon=True).start()
     
     def load_file(self, path, page, cache_key):
-        # Verify this is still the current selection before starting work
         if path != self.current_file_path:
-            logger.info(f"Skipping load - selection changed")
+            logger.info("Skipping load - selection changed")
             return
         
         try:
@@ -609,10 +613,9 @@ class FullscreenImageApp:
                 sheet_type = page.lower() if page != "Image" else "front"
                 sheet = self.excel_converter.find_sheet(path, sheet_type)
                 if not sheet:
-                    # Verify still current before updating UI
                     if path == self.current_file_path:
-                        self.root.after(0, lambda: self.image_label.config(image="", text=f"Sheet not found"))
-                    return
+                        self.root.after(0, lambda: self.image_label.config(image="", text="Sheet not found"))
+                            return
                 png_path = self.excel_converter.convert_excel_to_png(path, sheet)
                 if not png_path:
                     if path == self.current_file_path:
@@ -621,9 +624,8 @@ class FullscreenImageApp:
             else:
                 png_path = path
             
-            # Verify still current before loading image
             if path != self.current_file_path:
-                logger.info(f"Skipping display - selection changed")
+                logger.info("Skipping display - selection changed")
                 return
             
             with Image.open(png_path) as img:
@@ -634,7 +636,6 @@ class FullscreenImageApp:
             photo = ImageTk.PhotoImage(img_copy)
             self.image_cache.put(cache_key, photo)
             
-            # Final check before displaying
             if path == self.current_file_path:
                 self.root.after(0, lambda: (self.image_label.config(image=photo, text=""),
                                            setattr(self.image_label, 'image', photo)))
