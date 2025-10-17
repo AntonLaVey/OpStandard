@@ -72,6 +72,7 @@ class ImageCache:
 class ExcelConverter:
     def __init__(self, cache_dir="/tmp/pi-photo-viewer-cache"):
         self.cache_dir = cache_dir
+        self.conversion_lock = threading.Lock()  # Prevent concurrent conversions
         os.makedirs(cache_dir, exist_ok=True)
     
     def find_sheet(self, excel_path, sheet_type):
