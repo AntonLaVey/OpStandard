@@ -282,7 +282,7 @@ class FullscreenImageApp:
         self.control_bar_collapsed_height = 80
         self.control_bar_expanded_height = 180
         self.collapse_timer = None
-        self.collapse_delay = 60000
+        self.collapse_delay = 30000  # 30 seconds instead of 60
         
         self.control_frame = tk.Frame(root, bg="#1F2937", pady=10, padx=30)
         self.control_frame.pack(side="bottom", fill="x")
@@ -389,6 +389,7 @@ class FullscreenImageApp:
         if self.collapse_timer:
             self.root.after_cancel(self.collapse_timer)
             self.collapse_timer = None
+        self.reset_collapse_timer()  # Reset timer when opening dropdown
     
     def precache_excel_files(self, folder_path):
         logger.info(f"Pre-caching Excel files in {folder_path}")
@@ -446,7 +447,7 @@ class FullscreenImageApp:
         if self.current_file_path:
             self.display_file_async(self.current_file_path, page)
         if self.is_expanded:
-            self.reset_collapse_timer()
+            self.reset_collapse_timer()  # Reset timer on button click
     
     def on_media_change(self):
         self.root.after(500, self.update_media_sources)
@@ -563,7 +564,7 @@ class FullscreenImageApp:
     def on_folder_select(self, event):
         self.update_file_list()
         if self.is_expanded:
-            self.reset_collapse_timer()
+            self.reset_collapse_timer()  # Reset timer on folder selection
     
     def update_file_list(self):
         selected_folder_display_name = self.folder_variable.get()
