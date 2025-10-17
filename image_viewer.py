@@ -650,8 +650,11 @@ class FullscreenImageApp:
             self.root.after(0, self.update_ui_with_error, os.path.basename(file_path))
     
     def update_ui_with_image(self, photo):
-        self.image_label.config(image=photo, text="")
-        self.image_label.image = photo
+        try:
+            self.image_label.config(image=photo, text="")
+            self.image_label.image = photo
+        except Exception as e:
+            logger.error(f"Error updating UI with image: {e}")
     
     def update_ui_with_error(self, filename):
         self.image_label.config(image="", text=f"Error loading:\n{filename}")
