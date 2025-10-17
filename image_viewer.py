@@ -379,6 +379,8 @@ class FullscreenImageApp:
         self.excel_converter = ExcelConverter()
         self.precache_thread = None
         self.current_photoimage = None
+        self.background_precache_thread = None
+        self.stop_background_precache = False
         
         self.media_watcher = MediaWatcher(self.on_media_change)
         self.media_watcher.start()
@@ -405,6 +407,38 @@ class FullscreenImageApp:
             logger.info("Pre-caching complete")
         except Exception as e:
             logger.error(f"Pre-cache error: {e}")
+    
+    def background_precache_all_folders(self):
+        """Slowly precache all folders in background"""
+        logger.info("Starting background precache of all folders")
+        try:
+            # Precache all folders except current one (which is being done aggressively)
+            for folder_path in sorted(self.files_by_folder.keys()):
+                if self.stop_background_precache:
+                    logger.info("Background precache stopped")
+                    return
+                
+                logger.info(f"Background precaching folder: {folder_path}")
+                try:
+                    files = self.files_by_folder.get(folder_path, [])
+                    excel_files = [f for f in files if f.lower().endswith(".xlsx")]
+                    for excel_file in excel_files:
+                        if self.stop_background_precache:
+                            return
+                        for sheet_type in ["front", "back"]:
+                            if self.stop_background_precache:
+                                return
+                            actual_sheet = self.excel_converter.find_sheet(excel_file, sheet_type)
+                            if actual_sheet:
+                                logger.info(f"Background caching {os.path.basename(excel_file)} - {sheet_type}")
+                                self.excel_converter.convert_excel_to_png(excel_file, actual_sheet)
+                            time.sleep(0.5)  # Small delay between conversions
+                except Exception as e:
+                    logger.error(f"Background precache folder error: {e}")
+                    continue
+            logger.info("Background precache of all folders complete")
+        except Exception as e:
+            logger.error(f"Background precache error: {e}")
     
     def expand_controls(self):
         if self.is_expanded:
@@ -455,6 +489,7 @@ class FullscreenImageApp:
     def on_closing(self):
         logger.info("Application closing")
         self.stop_threads = True
+        self.stop_background_precache = True
         self.media_watcher.stop()
         self.root.destroy()
     
@@ -471,6 +506,15 @@ class FullscreenImageApp:
         logger.info(f"Media sources updated: {len(new_display_to_path)} folders found")
         self.display_to_path_map = new_display_to_path
         self.files_by_folder = new_files_by_folder
+        
+        # Start background precaching of all folders
+        if self.background_precache_thread is None or not self.background_precache_thread.is_alive():
+            self.stop_background_precache = False
+            self.background_precache_thread = threading.Thread(
+                target=self.background_precache_all_folders, 
+                daemon=True
+            )
+            self.background_precache_thread.start()
         
         if found_logo_path != self.last_logo_path:
             self.last_logo_path = found_logo_path
