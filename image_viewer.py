@@ -84,6 +84,18 @@ class ExcelConverter:
         self.conversion_lock = threading.Lock()
         os.makedirs(cache_dir, exist_ok=True)
         self._check_tools()
+        self._log_cache_status()
+    
+    def _log_cache_status(self):
+        """Log cache directory status on startup"""
+        try:
+            files = os.listdir(self.cache_dir)
+            png_files = [f for f in files if f.endswith('.png')]
+            meta_files = [f for f in files if f.endswith('.meta')]
+            logger.info(f"Cache directory: {self.cache_dir}")
+            logger.info(f"Cache contains: {len(png_files)} PNG files, {len(meta_files)} metadata files")
+        except Exception as e:
+            logger.error(f"Error checking cache status: {e}")
     
     def _check_tools(self):
         """Verify required tools are available - checks both 'convert' and 'magick'"""
@@ -152,33 +164,49 @@ class ExcelConverter:
             return None
     
     def is_cache_valid(self, cache_path, source_excel_path=None):
-        """Check if cache is valid"""
+        """Check if cache is valid with detailed logging"""
+        cache_name = os.path.basename(cache_path)
+        
+        # Check if cache file exists
         if not os.path.exists(cache_path):
+            logger.debug(f"Cache miss: {cache_name} - file not found")
             return False
         
+        # Check source modification time if provided
         if source_excel_path and os.path.exists(source_excel_path):
             try:
                 excel_mod_time = os.path.getmtime(source_excel_path)
                 meta_path = self.get_meta_path(cache_path)
+                
                 if os.path.exists(meta_path):
                     try:
                         with open(meta_path, 'r') as f:
                             cached_time = float(f.read().strip())
+                        
                         if excel_mod_time > cached_time:
-                            logger.info("Source modified, cache invalid")
+                            logger.info(f"Cache invalid: {cache_name} - source modified (Excel: {excel_mod_time}, Cache: {cached_time})")
                             return False
-                    except Exception:
-                        pass
-            except Exception:
-                pass
+                        else:
+                            logger.debug(f"Source timestamp OK for {cache_name}")
+                    except Exception as e:
+                        logger.warning(f"Cache metadata read error for {cache_name}: {e}")
+                        # If we can't read metadata but file exists, still check age
+                else:
+                    logger.debug(f"No metadata file for {cache_name}, checking age only")
+            except Exception as e:
+                logger.debug(f"Error checking source mod time for {cache_name}: {e}")
         
+        # Check file age
         try:
             file_age = datetime.now() - datetime.fromtimestamp(os.path.getmtime(cache_path))
             if file_age >= timedelta(days=CACHE_STALE_DAYS):
-                logger.info("Cache expired")
+                logger.info(f"Cache expired: {cache_name} - age {file_age.days} days")
                 return False
+            
+            logger.info(f"✓ Cache HIT: {cache_name} (age: {file_age.days} days)")
             return True
-        except Exception:
+        except Exception as e:
+            logger.error(f"Cache validation error for {cache_name}: {e}")
             return False
     
     def save_metadata(self, cache_path, source_excel_path):
@@ -188,8 +216,9 @@ class ExcelConverter:
             meta_path = self.get_meta_path(cache_path)
             with open(meta_path, 'w') as f:
                 f.write(str(excel_mod_time))
+            logger.debug(f"Metadata saved: {os.path.basename(meta_path)} (mtime: {excel_mod_time})")
         except Exception as e:
-            logger.error(f"Error saving metadata: {e}")
+            logger.error(f"Error saving metadata for {os.path.basename(cache_path)}: {e}")
     
     def convert_excel_to_png(self, excel_path, sheet_name, stop_event=None):
         """Convert Excel sheet to PNG with optional cancellation support"""
@@ -202,13 +231,18 @@ class ExcelConverter:
             temp_dir = None
             try:
                 cache_path = self.get_cache_path(excel_path, sheet_name)
+                logger.debug(f"Checking cache for: {os.path.basename(excel_path)} - {sheet_name}")
+                logger.debug(f"Cache path: {cache_path}")
+                
                 if self.is_cache_valid(cache_path, excel_path):
-                    logger.info(f"Cache hit: {os.path.basename(cache_path)}")
+                    # Cache hit - return immediately
                     return cache_path
                 
-                logger.info(f"Converting: {os.path.basename(excel_path)} - {sheet_name}")
+                # Cache miss - need to convert
+                logger.info(f"🔄 CONVERTING: {os.path.basename(excel_path)} - {sheet_name}")
                 sheet_index = self.get_sheet_index(excel_path, sheet_name)
                 if sheet_index is None:
+                    logger.error(f"Sheet '{sheet_name}' not found in workbook")
                     return None
                 
                 # Check stop event before expensive operations
@@ -255,8 +289,10 @@ class ExcelConverter:
                 
                 if os.path.exists(cache_path):
                     self.save_metadata(cache_path, excel_path)
-                    logger.info(f"Done: {os.path.basename(cache_path)}")
+                    logger.info(f"✓ CACHED: {os.path.basename(cache_path)}")
                     return cache_path
+                else:
+                    logger.error(f"Conversion completed but file not found: {cache_path}")
                 
                 return None
             
@@ -672,11 +708,14 @@ class FullscreenImageApp:
         
         cache_key = f"{path}_{page}"
         cached = self.image_cache.get(cache_key)
+        
         if cached:
+            logger.info(f"✓ Memory cache HIT: {os.path.basename(path)} - {page}")
             if path == self.current_file_path:
                 self.root.after(0, lambda: (self.image_label.config(image=cached, text=""),
                                            setattr(self.image_label, 'image', cached)))
         else:
+            logger.debug(f"Memory cache miss: {os.path.basename(path)} - {page}, loading from disk...")
             if path.lower().endswith(".xlsx"):
                 self.root.after(0, lambda: self.image_label.config(image="", text=f"Loading {page}..."))
             else:
@@ -689,6 +728,8 @@ class FullscreenImageApp:
             logger.info("Skipping load - selection changed")
             return
         
+        logger.info(f"Loading: {os.path.basename(path)} - {page}")
+        
         try:
             if path.lower().endswith(".xlsx"):
                 sheet_type = page.lower() if page != "Image" else "front"
@@ -696,18 +737,24 @@ class FullscreenImageApp:
                 
                 # CRITICAL FIX: Added proper return statement
                 if not sheet:
+                    logger.warning(f"Sheet type '{sheet_type}' not found in {os.path.basename(path)}")
                     if path == self.current_file_path:
                         self.root.after(0, lambda: self.image_label.config(image="", text="Sheet not found"))
                     return  # FIXED: This return was missing!
                 
+                logger.debug(f"Found sheet: {sheet}")
                 png_path = self.excel_converter.convert_excel_to_png(path, sheet)
+                
                 if not png_path:
+                    logger.error(f"Conversion failed for {os.path.basename(path)} - {sheet}")
                     if path == self.current_file_path:
                         self.root.after(0, lambda: self.image_label.config(image="", text=f"Failed to convert {page}"))
                     return
                 
+                logger.debug(f"Opening PNG: {png_path}")
                 img = Image.open(png_path)
             else:
+                logger.debug(f"Opening image file: {os.path.basename(path)}")
                 img = Image.open(path)
             
             screen_width = self.root.winfo_screenwidth()
@@ -719,18 +766,19 @@ class FullscreenImageApp:
             
             photo = ImageTk.PhotoImage(img)
             self.image_cache.put(cache_key, photo)
+            logger.info(f"✓ Image loaded and cached in memory: {cache_key}")
             
             if path == self.current_file_path:
                 self.root.after(0, lambda: (self.image_label.config(image=photo, text=""),
                                            setattr(self.image_label, 'image', photo)))
         except Exception as e:
-            logger.error(f"Error loading file: {e}")
+            logger.error(f"Error loading file {os.path.basename(path)}: {e}")
             if path == self.current_file_path:
                 self.root.after(0, lambda: self.image_label.config(image="", text=f"Error loading:\n{os.path.basename(path)}"))
     
     def precache_dept(self, dept, stop_event):
         """FIXED: Now accepts stop_event parameter"""
-        logger.info(f"BG precache started for {dept}")
+        logger.info(f"━━━ BG PRECACHE START: {dept} ━━━")
         
         # Check if this is a special department with a custom path
         if dept in SPECIAL_DEPT_PATHS:
@@ -751,29 +799,32 @@ class FullscreenImageApp:
             excluded = EXCLUDED_MODEL_FOLDERS.get(dept, [])
             models = [m for m in all_models if m not in excluded]
             
-            for model in models:
-                if stop_event.is_set():  # FIXED: Using passed stop_event
-                    logger.info("BG precache cancelled")
+            logger.info(f"BG precache: Found {len(models)} models in {dept}")
+            
+            for idx, model in enumerate(models, 1):
+                if stop_event.is_set():
+                    logger.info(f"BG precache cancelled at model {idx}/{len(models)}")
                     return
                 
                 model_path = os.path.join(dept_path, model)
+                logger.debug(f"BG precache [{idx}/{len(models)}]: {model}")
+                
                 try:
                     files = [os.path.join(model_path, f)
                             for f in os.listdir(model_path)
                             if f.lower().endswith(".xlsx")]
                     
                     for excel_file in files:
-                        if stop_event.is_set():  # FIXED: Using passed stop_event
-                            logger.info("BG precache cancelled")
+                        if stop_event.is_set():
                             return
                         
                         for sheet_type in ["front", "back"]:
-                            if stop_event.is_set():  # FIXED: Using passed stop_event
+                            if stop_event.is_set():
                                 return
                             
                             sheet = self.excel_converter.find_sheet(excel_file, sheet_type)
                             if sheet:
-                                logger.debug(f"BG caching: {os.path.basename(excel_file)} - {sheet_type}")
+                                logger.debug(f"  → Caching: {os.path.basename(excel_file)} - {sheet_type}")
                                 self.excel_converter.convert_excel_to_png(excel_file, sheet, stop_event)
                 except Exception as e:
                     logger.debug(f"BG precache error in {model}: {e}")
@@ -781,11 +832,12 @@ class FullscreenImageApp:
         except Exception as e:
             logger.error(f"BG precache error: {e}")
         
-        logger.info("BG precache complete")
+        logger.info(f"━━━ BG PRECACHE COMPLETE: {dept} ━━━")
     
     def precache_model_aggressive(self, model_path, stop_event):
         """FIXED: Now accepts stop_event parameter"""
-        logger.info(f"FG precache started for {os.path.basename(model_path)}")
+        model_name = os.path.basename(model_path)
+        logger.info(f"━━━ FG PRECACHE START: {model_name} ━━━")
         
         if not os.path.exists(model_path):
             logger.warning(f"Model path not found: {model_path}")
@@ -796,23 +848,28 @@ class FullscreenImageApp:
                     for f in os.listdir(model_path)
                     if f.lower().endswith(".xlsx")]
             
-            for excel_file in files:
-                if stop_event.is_set():  # FIXED: Using passed stop_event
-                    logger.info("FG precache cancelled")
+            logger.info(f"FG precache: Found {len(files)} Excel files in {model_name}")
+            
+            for idx, excel_file in enumerate(files, 1):
+                if stop_event.is_set():
+                    logger.info(f"FG precache cancelled at file {idx}/{len(files)}")
                     return
                 
+                filename = os.path.basename(excel_file)
+                logger.debug(f"FG precache [{idx}/{len(files)}]: {filename}")
+                
                 for sheet_type in ["front", "back"]:
-                    if stop_event.is_set():  # FIXED: Using passed stop_event
+                    if stop_event.is_set():
                         return
                     
                     sheet = self.excel_converter.find_sheet(excel_file, sheet_type)
                     if sheet:
-                        logger.info(f"FG caching: {os.path.basename(excel_file)} - {sheet_type}")
+                        logger.info(f"  → Caching: {filename} - {sheet_type}")
                         self.excel_converter.convert_excel_to_png(excel_file, sheet, stop_event)
         except Exception as e:
             logger.error(f"FG precache error: {e}")
         
-        logger.info("FG precache complete")
+        logger.info(f"━━━ FG PRECACHE COMPLETE: {model_name} ━━━")
 
 if __name__ == "__main__":
     root = tk.Tk()
