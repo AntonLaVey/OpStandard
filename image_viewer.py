@@ -1,4 +1,30 @@
-import tkinter as tk
+def start_network_polling(self):
+        """Start polling for network drive availability"""
+        logger.info("Starting network drive polling")
+        self.image_label.config(image="", text="Waiting for network drive...\n(polling every 10 seconds)")
+        threading.Thread(target=self._poll_network_drive, daemon=True).start()
+    
+    def _poll_network_drive(self):
+        """Poll network drive every 10 seconds until available"""
+        while not self.stop_polling.is_set():
+            try:
+                # Check if network path exists and is accessible
+                if os.path.exists(NETWORK_BASE_PATH) and os.path.isdir(NETWORK_BASE_PATH):
+                    logger.info("Network drive found!")
+                    self.network_available = True
+                    self.root.after(0, lambda: self.on_dept_select(None))
+                    return
+                else:
+                    logger.info("Network drive not available yet, retrying...")
+                    self.image_label.config(image="", text="Waiting for network drive...\n(polling every 10 seconds)")
+            except Exception as e:
+                logger.debug(f"Network poll error: {e}")
+            
+            # Wait 10 seconds before trying again
+            for _ in range(100):  # 10 seconds in 100ms increments
+                if self.stop_polling.is_set():
+                    return
+                time.sleep(0.1)import tkinter as tk
 from tkinter import ttk
 import os
 import threading
@@ -348,7 +374,8 @@ class FullscreenImageApp:
         
         if DEPARTMENTS:
             self.dept_var.set(DEPARTMENTS[0])
-            self.root.after(100, lambda: self.on_dept_select(None))
+            # Start polling for network drive instead of immediate connect
+            self.start_network_polling()
         
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
     
@@ -405,13 +432,11 @@ class FullscreenImageApp:
         # Signal all threads to stop
         self.stop_fg_precache.set()
         self.stop_bg_precache.set()
-        
-        # Don't wait - just destroy the window immediately
-        # Daemon threads will be killed when main thread exits
-        try:
-            self.root.destroy()
-        except Exception as e:
-            logger.error(f"Error during close: {e}")
+        self.stop_polling.set()
+        # Give threads a moment to exit
+        time.sleep(0.2)
+        # Force exit
+        os._exit(0)
     
     def on_dept_select(self, event):
         logger.info(f"Department: {self.dept_var.get()}")
