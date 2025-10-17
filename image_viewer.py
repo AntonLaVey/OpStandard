@@ -1,4 +1,90 @@
-import tkinter as tk
+def precache_excel_files(self, folder_path):
+        """Precache all Excel files in selected part model"""
+        logger.info(f"Pre-caching Excel files in {folder_path}")
+        try:
+            files = self.files_in_part_model
+            excel_files = [f for f in files if f.lower().endswith(".xlsx")]
+            for excel_file in excel_files:
+                if self.stop_background_precache:
+                    return
+                for sheet_type in ["front", "back"]:
+                    if self.stop_background_precache:
+                        return
+                    actual_sheet = self.excel_converter.find_sheet(excel_file, sheet_type)
+                    if actual_sheet:
+                        logger.info(f"Pre-caching {os.path.basename(excel_file)} - {sheet_type}")
+                        self.excel_converter.convert_excel_to_png(excel_file, actual_sheet)
+            logger.info("Pre-caching complete")
+        except Exception as e:
+            logger.error(f"Pre-cache error: {e}")
+    
+    def background_precache_department(self, department):
+        """Background precache all Excel files in entire department"""
+        logger.info(f"Starting background precache of department: {department}")
+        try:
+            dept_path = os.path.join(NETWORK_BASE_PATH, department)
+            
+            if not os.path.exists(dept_path):
+                logger.error(f"Department path does not exist: {dept_path}")
+                return
+            
+            # Iterate through all part models (folders) in department
+            try:
+                part_models = [item for item in os.listdir(dept_path) 
+                              if os.path.isdir(os.path.join(dept_path, item))]
+                part_models.sort()
+            except Exception as e:
+                logger.error(f"Error listing part models: {e}")
+                return
+            
+            logger.info(f"Background precaching {len(part_models)} part models")
+            
+            for part_model in part_models:
+                if self.stop_background_precache:
+                    logger.info("Background precache stopped")
+                    return
+                
+                part_model_path = os.path.join(dept_path, part_model)
+                logger.info(f"Background precaching part model: {part_model}")
+                
+                try:
+                    # Get all Excel files in this part model
+                    files = []
+                    for item in os.listdir(part_model_path):
+                        if self.stop_background_precache:
+                            return
+                        item_path = os.path.join(part_model_path, item)
+                        if os.path.isfile(item_path) and item.lower().endswith(".xlsx"):
+                            files.append(item_path)
+                    
+                    files.sort()
+                    
+                    # Precache each Excel file
+                    for excel_file in files:
+                        if self.stop_background_precache:
+                            return
+                        
+                        for sheet_type in ["front", "back"]:
+                            if self.stop_background_precache:
+                                return
+                            
+                            try:
+                                actual_sheet = self.excel_converter.find_sheet(excel_file, sheet_type)
+                                if actual_sheet:
+                                    logger.info(f"Background caching {os.path.basename(excel_file)} - {sheet_type}")
+                                    self.excel_converter.convert_excel_to_png(excel_file, actual_sheet)
+                            except Exception as e:
+                                logger.error(f"Error precaching {excel_file}: {e}")
+                            
+                            time.sleep(0.5)  # Small delay between conversions
+                
+                except Exception as e:
+                    logger.error(f"Error processing part model {part_model}: {e}")
+                    continue
+            
+            logger.info(f"Background precache of department {department} complete")
+        except Exception as e:
+            logger.error(f"Background precache error: {e}")import tkinter as tk
 from tkinter import ttk
 import os
 from PIL import Image, ImageTk
@@ -357,6 +443,8 @@ class FullscreenImageApp:
         self.excel_converter = ExcelConverter()
         self.precache_thread = None
         self.current_photoimage = None
+        self.background_precache_thread = None
+        self.stop_background_precache = False
         
         # Initialize by setting first department
         if DEPARTMENTS:
@@ -416,6 +504,7 @@ class FullscreenImageApp:
     
     def on_closing(self):
         logger.info("Application closing")
+        self.stop_background_precache = True
         self.root.destroy()
     
     def on_department_select(self, event):
@@ -429,6 +518,16 @@ class FullscreenImageApp:
         
         # Get part models for this department
         self.update_part_models()
+        
+        # Start background precaching of entire department
+        self.stop_background_precache = False
+        if self.background_precache_thread is None or not self.background_precache_thread.is_alive():
+            self.background_precache_thread = threading.Thread(
+                target=self.background_precache_department,
+                args=(department,),
+                daemon=True
+            )
+            self.background_precache_thread.start()
         
         if self.is_expanded:
             self.reset_collapse_timer()
@@ -481,6 +580,15 @@ class FullscreenImageApp:
         
         # Get files in this part model
         self.update_file_list()
+        
+        # Start precaching for this part model
+        if self.precache_thread is None or not self.precache_thread.is_alive():
+            self.precache_thread = threading.Thread(
+                target=self.precache_excel_files, 
+                args=(self.current_part_model_path,), 
+                daemon=True
+            )
+            self.precache_thread.start()
         
         if self.is_expanded:
             self.reset_collapse_timer()
