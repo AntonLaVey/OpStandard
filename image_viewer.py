@@ -358,6 +358,8 @@ class FullscreenImageApp:
         self.stop_polling = threading.Event()
         self.precache_thread = None
         self.fg_precache_thread = None
+        self.bg_stop_event = None
+        self.fg_stop_event = None
         self.network_available = False
         
         if DEPARTMENTS:
@@ -460,10 +462,19 @@ class FullscreenImageApp:
             self.root.after(0, lambda: self.image_label.config(image="", text="Network drive not available"))
             return
         
-        self.stop_bg_precache.set()
-        time.sleep(0.05)
-        bg_thread = threading.Thread(target=self._bg_precache_starter, daemon=True)
-        bg_thread.start()
+        # Stop old background precache thread
+        if self.precache_thread and self.precache_thread.is_alive():
+            self.bg_stop_event.set()
+            self.precache_thread.join(timeout=1.0)
+        
+        # Start new background precache with fresh stop event
+        self.bg_stop_event = threading.Event()
+        self.precache_thread = threading.Thread(
+            target=self.precache_dept,
+            args=(self.dept_var.get(), self.bg_stop_event),
+            daemon=True
+        )
+        self.precache_thread.start()
         
         if self.is_expanded:
             self.root.after(0, self.reset_collapse_timer)
@@ -615,110 +626,3 @@ class FullscreenImageApp:
                 if not sheet:
                     if path == self.current_file_path:
                         self.root.after(0, lambda: self.image_label.config(image="", text="Sheet not found"))
-                            return
-                png_path = self.excel_converter.convert_excel_to_png(path, sheet)
-                if not png_path:
-                    if path == self.current_file_path:
-                        self.root.after(0, lambda: self.image_label.config(image="", text="Conversion failed"))
-                    return
-            else:
-                png_path = path
-            
-            if path != self.current_file_path:
-                logger.info("Skipping display - selection changed")
-                return
-            
-            with Image.open(png_path) as img:
-                img_copy = img.copy()
-            
-            w, h = self.root.winfo_screenwidth(), self.root.winfo_screenheight() - self.control_bar_collapsed_height
-            img_copy.thumbnail((min(w, MAX_IMAGE_DIMENSION), min(h, MAX_IMAGE_DIMENSION)), Image.LANCZOS)
-            photo = ImageTk.PhotoImage(img_copy)
-            self.image_cache.put(cache_key, photo)
-            
-            if path == self.current_file_path:
-                self.root.after(0, lambda: (self.image_label.config(image=photo, text=""),
-                                           setattr(self.image_label, 'image', photo)))
-        except Exception as e:
-            logger.error(f"Load error: {e}")
-            if path == self.current_file_path:
-                self.root.after(0, lambda: self.image_label.config(image="", text="Error loading file"))
-    
-    def precache_model_aggressive(self, model_path):
-        """Aggressively precache current model"""
-        if not model_path or not os.path.exists(model_path):
-            return
-        logger.info(f"Aggressive precache START: {os.path.basename(model_path)}")
-        try:
-            for f in sorted(os.listdir(model_path)):
-                if self.stop_fg_precache.is_set():
-                    logger.info("Aggressive precache STOPPED")
-                    return
-                if f.lower().endswith(".xlsx"):
-                    file_path = os.path.join(model_path, f)
-                    if self.stop_fg_precache.is_set():
-                        return
-                    for sheet_type in ["front", "back"]:
-                        if self.stop_fg_precache.is_set():
-                            return
-                        try:
-                            sheet = self.excel_converter.find_sheet(file_path, sheet_type)
-                            if sheet:
-                                cache_path = self.excel_converter.get_cache_path(file_path, sheet)
-                                if not self.excel_converter.is_cache_valid(cache_path, file_path):
-                                    logger.info(f"Aggressive: {os.path.basename(file_path)} - {sheet_type}")
-                                    self.excel_converter.convert_excel_to_png(file_path, sheet)
-                                else:
-                                    logger.info(f"Already cached: {os.path.basename(file_path)} - {sheet_type}")
-                        except Exception as e:
-                            logger.error(f"Error in aggressive precache: {e}")
-                            if self.stop_fg_precache.is_set():
-                                return
-        except Exception as e:
-            logger.error(f"Aggressive precache error: {e}")
-    
-    def precache_dept(self, dept):
-        """Slowly precache entire department in background"""
-        logger.info(f"Background precache START: {dept}")
-        dept_path = os.path.join(NETWORK_BASE_PATH, dept)
-        try:
-            models = sorted([d for d in os.listdir(dept_path) if os.path.isdir(os.path.join(dept_path, d))])
-            for model in models:
-                if self.stop_bg_precache.is_set():
-                    logger.info("Background precache STOPPED")
-                    return
-                model_path = os.path.join(dept_path, model)
-                try:
-                    for f in sorted(os.listdir(model_path)):
-                        if self.stop_bg_precache.is_set():
-                            return
-                        if f.lower().endswith(".xlsx"):
-                            file_path = os.path.join(model_path, f)
-                            if self.stop_bg_precache.is_set():
-                                return
-                            for sheet_type in ["front", "back"]:
-                                if self.stop_bg_precache.is_set():
-                                    return
-                                try:
-                                    sheet = self.excel_converter.find_sheet(file_path, sheet_type)
-                                    if sheet:
-                                        cache_path = self.excel_converter.get_cache_path(file_path, sheet)
-                                        if not self.excel_converter.is_cache_valid(cache_path, file_path):
-                                            logger.info(f"Background: {os.path.basename(file_path)} - {sheet_type}")
-                                            self.excel_converter.convert_excel_to_png(file_path, sheet)
-                                        else:
-                                            logger.info(f"Already cached (bg): {os.path.basename(file_path)} - {sheet_type}")
-                                    time.sleep(0.1)
-                                except Exception as e:
-                                    logger.error(f"Error in background precache: {e}")
-                                    if self.stop_bg_precache.is_set():
-                                        return
-                except Exception as e:
-                    logger.error(f"Background error in {model}: {e}")
-        except Exception as e:
-            logger.error(f"Background precache error: {e}")
-
-if __name__ == "__main__":
-    root = tk.Tk()
-    app = FullscreenImageApp(root)
-    root.mainloop()
