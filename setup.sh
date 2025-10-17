@@ -80,30 +80,31 @@ chmod +x "$APP_SCRIPT_PATH"
 
 echo "[6/7] Configuring systemd services..."
 
-# LibreOffice persistent listener
-cat > /etc/systemd/system/libreoffice-listener.service << 'EOF'
-[Unit]
-Description=LibreOffice Headless Listener
-Before=pi-photo-viewer.service
-
-[Service]
-Type=simple
-User=pi
-ExecStart=/usr/bin/libreoffice --headless --accept="socket,host=localhost,port=2002;urp;StarOffice.ComponentContext" --nofirststartwizard --nologo --norestore
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-EOF
+# LibreOffice persistent listener - DISABLED
+# We'll use fresh processes instead to avoid hangs
+# cat > /etc/systemd/system/libreoffice-listener.service << 'EOF'
+# [Unit]
+# Description=LibreOffice Headless Listener
+# Before=pi-photo-viewer.service
+#
+# [Service]
+# Type=simple
+# User=pi
+# ExecStart=/usr/bin/libreoffice --headless --accept="socket,host=localhost,port=2002;urp;StarOffice.ComponentContext" --nofirststartwizard --nologo --norestore --disable-extension-update
+# Restart=always
+# RestartSec=10
+# TimeoutStopSec=15
+# KillMode=mixed
+#
+# [Install]
+# WantedBy=multi-user.target
+# EOF
 
 # Main application service
 cat > /etc/systemd/system/pi-photo-viewer.service << EOF
 [Unit]
 Description=Raspberry Pi Standards Viewer
-After=graphical.target libreoffice-listener.service
-Wants=graphical.target
-Requires=libreoffice-listener.service
+After=graphical.target
 
 [Service]
 Type=simple
@@ -117,7 +118,7 @@ Restart=on-failure
 RestartSec=10
 StandardOutput=journal
 StandardError=journal
-TimeoutStopSec=30
+TimeoutStopSec=10
 KillMode=mixed
 KillSignal=SIGTERM
 
@@ -143,12 +144,7 @@ chown "$REAL_USER":"$REAL_USER" "$HOME_DIR/Desktop/PhotoViewer.desktop"
 chmod +x "$HOME_DIR/Desktop/PhotoViewer.desktop"
 
 usermod -a -G video pi
-chmod 644 /etc/systemd/system/libreoffice-listener.service
 chmod 644 /etc/systemd/system/pi-photo-viewer.service
-
-systemctl daemon-reload
-systemctl enable libreoffice-listener.service
-systemctl enable pi-photo-viewer.service
 
 echo "[7/7] Disabling USB pop-ups..."
 SYSTEM_CONFIG_FILE="/etc/xdg/pcmanfm/LXDE-pi/pcmanfm.conf"
