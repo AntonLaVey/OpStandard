@@ -55,6 +55,193 @@ SHEET_MAPPING = {
     "back": ["back", "back page"],
 }
 
+
+class TouchDropdown(tk.Frame):
+    """Touch-friendly dropdown widget with swipe scrolling support."""
+
+    def __init__(self, parent, *, variable=None, values=None, font=None,
+                 on_open=None, background="#1F2937", button_background="#374151",
+                 foreground="#06B6D4"):
+        super().__init__(parent, bg=background)
+        self.variable = variable or tk.StringVar()
+        self.values = list(values) if values else []
+        self.font = font or ("Helvetica", 16, "bold")
+        self.on_open = on_open
+        self.selection_callback = None
+        self.popup = None
+        self.listbox = None
+        self.touch_start_y = None
+
+        self.display_button = tk.Button(
+            self,
+            textvariable=self.variable,
+            font=self.font,
+            anchor="w",
+            bg=button_background,
+            fg=foreground,
+            activebackground="#4B5563",
+            activeforeground=foreground,
+            relief="raised",
+            bd=3,
+            cursor="hand2",
+            highlightthickness=0,
+            padx=20,
+            pady=10,
+        )
+        self.display_button.pack(side="left", fill="both", expand=True)
+        self.display_button.bind("<Button-1>", self._open_popup)
+
+        arrow_font_size = 18
+        if isinstance(self.font, tuple) and len(self.font) > 1:
+            try:
+                arrow_font_size = max(int(self.font[1]) - 2, 12)
+            except Exception:
+                arrow_font_size = 18
+
+        self.arrow_label = tk.Label(
+            self,
+            text="▼",
+            font=(self.font[0] if isinstance(self.font, tuple) else "Helvetica", arrow_font_size, "bold"),
+            bg=button_background,
+            fg=foreground,
+            padx=15,
+        )
+        self.arrow_label.pack(side="right", fill="y")
+        self.arrow_label.bind("<Button-1>", self._open_popup)
+
+        self.bind("<Button-1>", self._open_popup)
+
+    def _open_popup(self, event=None):
+        if self.popup or not self.values:
+            if event:
+                return "break"
+            return
+
+        if callable(self.on_open):
+            self.on_open(self)
+
+        self.popup = tk.Toplevel(self)
+        self.popup.wm_overrideredirect(True)
+        self.popup.attributes("-topmost", True)
+        self.popup.configure(bg="#1F2937")
+
+        x = self.winfo_rootx()
+        y = self.winfo_rooty() + self.winfo_height()
+        width = self.winfo_width()
+        self.popup.geometry(f"{width}x250+{x}+{y}")
+
+        container = tk.Frame(self.popup, bg="#1F2937")
+        container.pack(fill="both", expand=True)
+
+        self.listbox = tk.Listbox(
+            container,
+            font=self.font,
+            activestyle="none",
+            bg="#1F2937",
+            fg="#06B6D4",
+            selectbackground="#06B6D4",
+            selectforeground="#1F2937",
+            highlightthickness=0,
+            relief="flat",
+        )
+        self.listbox.pack(side="left", fill="both", expand=True)
+
+        scrollbar = ttk.Scrollbar(container, orient="vertical", command=self.listbox.yview)
+        scrollbar.pack(side="right", fill="y")
+        self.listbox.configure(yscrollcommand=scrollbar.set)
+
+        self.listbox.bind("<ButtonPress-1>", self._on_touch_start)
+        self.listbox.bind("<B1-Motion>", self._on_touch_scroll)
+        self.listbox.bind("<ButtonRelease-1>", self._on_listbox_select)
+
+        for value in self.values:
+            self.listbox.insert(tk.END, value)
+
+        self._highlight_current()
+
+        self.popup.bind("<FocusOut>", lambda _e: self.close_popup())
+        self.popup.focus_set()
+
+        if event:
+            return "break"
+
+    def _on_touch_start(self, event):
+        self.touch_start_y = event.y
+        return "break"
+
+    def _on_touch_scroll(self, event):
+        if self.touch_start_y is None:
+            self.touch_start_y = event.y
+        delta = self.touch_start_y - event.y
+        if abs(delta) >= 2:
+            self.listbox.yview_scroll(int(delta / 2), "units")
+            self.touch_start_y = event.y
+        return "break"
+
+    def _on_listbox_select(self, event=None):
+        if event is not None:
+            index = self.listbox.nearest(event.y)
+            if index >= 0:
+                self.listbox.selection_clear(0, tk.END)
+                self.listbox.selection_set(index)
+                self.listbox.activate(index)
+        selection = self.listbox.curselection()
+        if selection:
+            value = self.listbox.get(selection[0])
+            self.set(value)
+            if callable(self.selection_callback):
+                self.selection_callback(value)
+        self.close_popup()
+        return "break"
+
+    def _highlight_current(self):
+        if not self.listbox:
+            return
+        current = self.variable.get()
+        if current in self.values:
+            index = self.values.index(current)
+            self.listbox.selection_clear(0, tk.END)
+            self.listbox.selection_set(index)
+            self.listbox.see(index)
+        else:
+            self.listbox.selection_clear(0, tk.END)
+
+    def close_popup(self):
+        if self.popup:
+            try:
+                self.popup.destroy()
+            except tk.TclError:
+                pass
+            finally:
+                self.popup = None
+                self.listbox = None
+                self.touch_start_y = None
+
+    def set_on_select(self, callback):
+        self.selection_callback = callback
+
+    def set_values(self, values):
+        self.values = list(values) if values else []
+        current = self.variable.get()
+        if current not in self.values:
+            self.variable.set("")
+
+        if self.listbox:
+            self.listbox.delete(0, tk.END)
+            for value in self.values:
+                self.listbox.insert(tk.END, value)
+            self._highlight_current()
+
+    def get(self):
+        return self.variable.get()
+
+    def set(self, value):
+        if value is None:
+            value = ""
+        self.variable.set(value)
+        if self.listbox:
+            self._highlight_current()
+
 class ImageCache:
     def __init__(self, max_size=IMAGE_CACHE_SIZE):
         self.cache = {}
@@ -318,19 +505,11 @@ class FullscreenImageApp:
         self.root.after(200, lambda: self.root.attributes("-fullscreen", True))
         self.root.configure(bg="black")
         
-        style = ttk.Style()
-        style.theme_use("clam")
-        style.configure("TCombobox", fieldbackground="#374151", background="#4B5563",
-                       foreground="#06B6D4", arrowcolor="#06B6D4", arrowsize=30)
-        self.root.option_add("*TCombobox*Listbox.font", ("Helvetica", 22, "bold"))
-        self.root.option_add("*TCombobox*Listbox.background", "#1F2937")
-        self.root.option_add("*TCombobox*Listbox.foreground", "#06B6D4")
-        
         self.control_bar_collapsed_height = 80
         self.control_bar_expanded_height = 220
         self.collapse_timer = None
         self.collapse_delay = 30000
-        
+
         self.control_frame = tk.Frame(root, bg="#1F2937", pady=10, padx=30)
         self.control_frame.pack(side="bottom", fill="x")
         self.control_frame.pack_propagate(False)
@@ -372,33 +551,48 @@ class FullscreenImageApp:
         tk.Label(row1, text="Department:", bg="#1F2937", fg="#06B6D4",
                 font=("Helvetica", 20, "bold")).pack(side="left", padx=(0, 10))
         self.dept_var = tk.StringVar(root)
-        self.dept_dropdown = ttk.Combobox(row1, textvariable=self.dept_var,
-                                         font=("Helvetica", 22, "bold"), state="readonly", height=5,
-                                         postcommand=self.on_dropdown_open)
-        self.dept_dropdown["values"] = DEPARTMENTS
+        self.dept_dropdown = TouchDropdown(
+            row1,
+            variable=self.dept_var,
+            values=DEPARTMENTS,
+            font=("Helvetica", 22, "bold"),
+            on_open=self.on_dropdown_open,
+        )
         self.dept_dropdown.pack(side="left", expand=True, fill="both", padx=(0, 20))
-        self.dept_dropdown.bind("<<ComboboxSelected>>", self.on_dept_select)
-        
+        self.dept_dropdown.set_on_select(self.on_dept_select)
+
         tk.Label(row1, text="Part Model:", bg="#1F2937", fg="#06B6D4",
                 font=("Helvetica", 20, "bold")).pack(side="left", padx=(0, 10))
         self.model_var = tk.StringVar(root)
-        self.model_dropdown = ttk.Combobox(row1, textvariable=self.model_var,
-                                          font=("Helvetica", 22, "bold"), state="readonly", height=5,
-                                          postcommand=self.on_dropdown_open)
+        self.model_dropdown = TouchDropdown(
+            row1,
+            variable=self.model_var,
+            font=("Helvetica", 22, "bold"),
+            on_open=self.on_dropdown_open,
+        )
         self.model_dropdown.pack(side="left", expand=True, fill="both")
-        self.model_dropdown.bind("<<ComboboxSelected>>", self.on_model_select)
-        
+        self.model_dropdown.set_on_select(self.on_model_select)
+
         row2 = tk.Frame(self.expanded_container, bg="#1F2937")
         row2.pack(fill="x", pady=(0, 10))
-        
+
         tk.Label(row2, text="File:", bg="#1F2937", fg="#06B6D4",
                 font=("Helvetica", 20, "bold")).pack(side="left", padx=(0, 10))
         self.file_var = tk.StringVar(root)
-        self.file_dropdown = ttk.Combobox(row2, textvariable=self.file_var,
-                                         font=("Helvetica", 22, "bold"), state="readonly", height=5,
-                                         postcommand=self.on_dropdown_open)
+        self.file_dropdown = TouchDropdown(
+            row2,
+            variable=self.file_var,
+            font=("Helvetica", 22, "bold"),
+            on_open=self.on_dropdown_open,
+        )
         self.file_dropdown.pack(side="left", expand=True, fill="both")
-        self.file_dropdown.bind("<<ComboboxSelected>>", self.on_file_select)
+        self.file_dropdown.set_on_select(self.on_file_select)
+
+        self.touch_dropdowns = [
+            self.dept_dropdown,
+            self.model_dropdown,
+            self.file_dropdown,
+        ]
         
         row3 = tk.Frame(self.expanded_container, bg="#1F2937")
         row3.pack(fill="x")
@@ -450,24 +644,25 @@ class FullscreenImageApp:
         
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
     
-    def on_dropdown_open(self):
+    def close_all_dropdowns(self, exclude=None):
+        for dropdown in getattr(self, "touch_dropdowns", []):
+            if dropdown is exclude:
+                continue
+            dropdown.close_popup()
+
+    def on_dropdown_open(self, dropdown=None):
+        self.close_all_dropdowns(exclude=dropdown)
         if self.collapse_timer:
             self.root.after_cancel(self.collapse_timer)
         self.reset_collapse_timer()
-    
+
     def expand_controls(self):
         if self.is_expanded:
             return
-        
-        # Close any open dropdown menus before expanding
+
+        self.close_all_dropdowns()
         self.root.focus_set()
-        try:
-            self.dept_dropdown.selection_clear()
-            self.model_dropdown.selection_clear()
-            self.file_dropdown.selection_clear()
-        except:
-            pass
-        
+
         self.is_expanded = True
         self.collapsed_container.pack_forget()
         self.expanded_container.pack(fill="both", expand=True)
@@ -479,17 +674,10 @@ class FullscreenImageApp:
         if not self.is_expanded:
             return
         
+        self.close_all_dropdowns()
         # Close any open dropdown menus by shifting focus
         self.root.focus_set()
-        
-        # Force close dropdown popups
-        try:
-            self.dept_dropdown.selection_clear()
-            self.model_dropdown.selection_clear()
-            self.file_dropdown.selection_clear()
-        except:
-            pass
-        
+
         self.is_expanded = False
         self.expanded_container.pack_forget()
         self.collapsed_container.pack(fill="both", expand=True)
@@ -584,7 +772,7 @@ class FullscreenImageApp:
                     return
                 time.sleep(0.1)
     
-    def on_dept_select(self, event):
+    def on_dept_select(self, _value=None):
         logger.info(f"Department: {self.dept_var.get()}")
         threading.Thread(target=self._dept_select_worker, daemon=True).start()
     
@@ -621,7 +809,7 @@ class FullscreenImageApp:
     def update_models(self):
         dept = self.dept_var.get()
         if not dept:
-            self.root.after(0, lambda: self.model_dropdown.__setitem__("values", []))
+            self.root.after(0, lambda: self.model_dropdown.set_values([]))
             return
         
         # Check if this is a special department with a custom path
@@ -632,7 +820,7 @@ class FullscreenImageApp:
         
         if not os.path.exists(dept_path):
             logger.error(f"Department path not found: {dept_path}")
-            self.root.after(0, lambda: self.model_dropdown.__setitem__("values", []))
+            self.root.after(0, lambda: self.model_dropdown.set_values([]))
             self.root.after(0, lambda: self.image_label.config(image="", text="Department not accessible"))
             return
         
@@ -645,15 +833,15 @@ class FullscreenImageApp:
             excluded = EXCLUDED_MODEL_FOLDERS.get(dept, [])
             models = sorted([m for m in all_models if m not in excluded])
             
-            self.root.after(0, lambda: self.model_dropdown.__setitem__("values", models))
+            self.root.after(0, lambda: self.model_dropdown.set_values(models))
             if models:
-                self.root.after(0, lambda: (self.model_var.set(models[0]), self.on_model_select(None)))
+                self.root.after(0, lambda first=models[0]: self._select_model(first))
         except Exception as e:
             logger.error(f"Error listing models: {e}")
-            self.root.after(0, lambda: self.model_dropdown.__setitem__("values", []))
+            self.root.after(0, lambda: self.model_dropdown.set_values([]))
             self.root.after(0, lambda: self.image_label.config(image="", text="Error reading department"))
-    
-    def on_model_select(self, event):
+
+    def on_model_select(self, _value=None):
         # Stop old foreground precache
         if self.fg_precache_stop and self.fg_precache_thread:
             logger.debug("Stopping old fg precache thread")
@@ -680,7 +868,7 @@ class FullscreenImageApp:
         dept = self.dept_var.get()
         model = self.model_var.get()
         if not dept or not model:
-            self.file_dropdown["values"] = []
+            self.file_dropdown.set_values([])
             self.files_list = []
             return
         
@@ -694,7 +882,7 @@ class FullscreenImageApp:
         
         if not os.path.exists(self.current_model_path):
             logger.error(f"Model path not found: {self.current_model_path}")
-            self.file_dropdown["values"] = []
+            self.file_dropdown.set_values([])
             self.files_list = []
             self.root.after(0, lambda: self.image_label.config(image="", text="Model not accessible"))
             return
@@ -705,19 +893,23 @@ class FullscreenImageApp:
                                      if os.path.isfile(os.path.join(self.current_model_path, f))
                                      and f.lower().endswith(SUPPORTED_FORMATS)])
             names = [os.path.splitext(os.path.basename(f))[0] for f in self.files_list]
-            self.file_dropdown["values"] = names
+            self.file_dropdown.set_values(names)
             if names:
-                self.file_var.set(names[0])
-                self.on_file_select(None)
+                self.file_dropdown.set(names[0])
+                self.on_file_select(names[0])
             else:
                 self.root.after(0, lambda: self.image_label.config(image="", text="No files found"))
         except Exception as e:
             logger.error(f"Error listing files: {e}")
-            self.file_dropdown["values"] = []
+            self.file_dropdown.set_values([])
             self.files_list = []
             self.root.after(0, lambda: self.image_label.config(image="", text="Error reading files"))
+
+    def _select_model(self, value):
+        self.model_dropdown.set(value)
+        self.on_model_select(value)
     
-    def on_file_select(self, event):
+    def on_file_select(self, _value=None):
         name = self.file_var.get()
         if not name or not self.files_list:
             return
