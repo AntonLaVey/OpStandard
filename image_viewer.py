@@ -71,7 +71,6 @@ class TouchDropdown(tk.Frame):
         self.popup = None
         self.listbox = None
         self.touch_start_y = None
-
         self.display_button = tk.Button(
             self,
             textvariable=self.variable,
