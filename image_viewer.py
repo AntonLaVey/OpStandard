@@ -71,15 +71,20 @@ class TouchDropdown(tk.Frame):
         self.popup = None
         self.listbox = None
         self.touch_start_y = None
+        self.enabled = True
+        self.button_background = button_background
+        self.button_disabled_background = "#111827"
+        self.foreground = foreground
+        self.foreground_disabled = "#4B5563"
         self.display_button = tk.Button(
             self,
             textvariable=self.variable,
             font=self.font,
             anchor="w",
-            bg=button_background,
-            fg=foreground,
+            bg=self.button_background,
+            fg=self.foreground,
             activebackground="#4B5563",
-            activeforeground=foreground,
+            activeforeground=self.foreground,
             relief="raised",
             bd=3,
             cursor="hand2",
@@ -101,8 +106,8 @@ class TouchDropdown(tk.Frame):
             self,
             text="▼",
             font=(self.font[0] if isinstance(self.font, tuple) else "Helvetica", arrow_font_size, "bold"),
-            bg=button_background,
-            fg=foreground,
+            bg=self.button_background,
+            fg=self.foreground,
             padx=15,
         )
         self.arrow_label.pack(side="right", fill="y")
@@ -111,7 +116,7 @@ class TouchDropdown(tk.Frame):
         self.bind("<Button-1>", self._open_popup)
 
     def _open_popup(self, event=None):
-        if self.popup or not self.values:
+        if self.popup or not self.values or not self.enabled:
             if event:
                 return "break"
             return
@@ -240,6 +245,35 @@ class TouchDropdown(tk.Frame):
         self.variable.set(value)
         if self.listbox:
             self._highlight_current()
+
+    def set_state(self, state):
+        """Enable or disable the dropdown while keeping styling consistent."""
+
+        desired = "disabled" if state in ("disabled", "readonly") else "normal"
+
+        if desired == "disabled":
+            if self.popup:
+                self.close_popup()
+            self.enabled = False
+        else:
+            self.enabled = True
+
+        button_state = "normal" if self.enabled else "disabled"
+        self.display_button.config(
+            state=button_state,
+            bg=self.button_background if self.enabled else self.button_disabled_background,
+            fg=self.foreground if self.enabled else self.foreground_disabled,
+            activeforeground=self.foreground if self.enabled else self.foreground_disabled,
+            activebackground="#4B5563" if self.enabled else self.button_disabled_background,
+            cursor="hand2" if self.enabled else "arrow",
+        )
+        self.arrow_label.config(
+            fg=self.foreground if self.enabled else self.foreground_disabled,
+            bg=self.button_background if self.enabled else self.button_disabled_background,
+        )
+
+    def get_state(self):
+        return "normal" if self.enabled else "disabled"
 
 class ImageCache:
     def __init__(self, max_size=IMAGE_CACHE_SIZE):
@@ -732,9 +766,9 @@ class FullscreenImageApp:
 
         def apply_state():
             self.network_available = online
-            state = "readonly" if online else "disabled"
-            for combo in (self.dept_dropdown, self.model_dropdown, self.file_dropdown):
-                combo.configure(state=state)
+            state = "normal" if online else "disabled"
+            for dropdown in self.touch_dropdowns:
+                dropdown.set_state(state)
 
             if not online:
                 self.image_label.config(image="", text="Waiting for network drive...\n(polling every 10 seconds)")
