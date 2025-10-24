@@ -71,8 +71,6 @@ class TouchDropdown(tk.Frame):
         self.popup = None
         self.listbox = None
         self.touch_start_y = None
-        self.touch_start_fraction = None
-
         self.display_button = tk.Button(
             self,
             textvariable=self.variable,
@@ -167,29 +165,16 @@ class TouchDropdown(tk.Frame):
             return "break"
 
     def _on_touch_start(self, event):
-        if not self.listbox:
-            return "break"
-
         self.touch_start_y = event.y
-        yview = self.listbox.yview()
-        self.touch_start_fraction = yview[0] if yview else 0.0
         return "break"
 
     def _on_touch_scroll(self, event):
-        if not self.listbox:
-            return "break"
-
-        if self.touch_start_y is None or self.touch_start_fraction is None:
-            self._on_touch_start(event)
-
-        height = self.listbox.winfo_height()
-        if height <= 0:
-            return "break"
-
-        delta_fraction = (self.touch_start_y - event.y) / height
-        new_fraction = self.touch_start_fraction + delta_fraction
-        new_fraction = max(0.0, min(1.0, new_fraction))
-        self.listbox.yview_moveto(new_fraction)
+        if self.touch_start_y is None:
+            self.touch_start_y = event.y
+        delta = self.touch_start_y - event.y
+        if abs(delta) >= 2:
+            self.listbox.yview_scroll(int(delta / 2), "units")
+            self.touch_start_y = event.y
         return "break"
 
     def _on_listbox_select(self, event=None):
@@ -230,7 +215,6 @@ class TouchDropdown(tk.Frame):
                 self.popup = None
                 self.listbox = None
                 self.touch_start_y = None
-                self.touch_start_fraction = None
 
     def set_on_select(self, callback):
         self.selection_callback = callback
@@ -632,7 +616,8 @@ class FullscreenImageApp:
         self.image_label = tk.Label(root, bg="black", fg="white", font=("Helvetica", 24))
         self.image_label.pack(expand=True, fill="both")
         self.image_label.bind("<Button-1>", lambda e: self.expand_controls())
-        
+        self.image_label.config(image="", text="Waiting for network drive...\n(polling every 10 seconds)")
+
         self.current_page = "Front"
         self.is_expanded = False
         self.current_file_path = None
@@ -640,7 +625,7 @@ class FullscreenImageApp:
         self.files_list = []
         self.image_cache = ImageCache()
         self.excel_converter = ExcelConverter()
-        
+
         # Thread management with explicit per-thread stop events
         self.bg_precache_thread = None
         self.bg_precache_stop = None
@@ -648,12 +633,13 @@ class FullscreenImageApp:
         self.fg_precache_stop = None
         self.polling_thread = None
         self.polling_stop = threading.Event()
-        
+
         self.network_available = False
-        
+        self.set_online_state(False)
+
         if DEPARTMENTS:
             self.dept_var.set(DEPARTMENTS[0])
-            self.start_network_polling()
+            self.root.after_idle(self.start_network_polling)
         
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
     
@@ -723,7 +709,7 @@ class FullscreenImageApp:
     
     def on_close(self):
         logger.info("App closing - setting stop flags")
-        
+
         # Stop polling
         self.polling_stop.set()
         
@@ -741,10 +727,26 @@ class FullscreenImageApp:
         
         self.root.quit()
     
+    def set_online_state(self, online: bool):
+        """Update UI controls based on network availability."""
+
+        def apply_state():
+            self.network_available = online
+            state = "readonly" if online else "disabled"
+            for combo in (self.dept_dropdown, self.model_dropdown, self.file_dropdown):
+                combo.configure(state=state)
+
+            if not online:
+                self.image_label.config(image="", text="Waiting for network drive...\n(polling every 10 seconds)")
+
+        if threading.current_thread() is threading.main_thread():
+            apply_state()
+        else:
+            self.root.after(0, apply_state)
+
     def start_network_polling(self):
         """Start polling for network drive availability"""
         logger.info("Starting network drive polling")
-        self.root.after(0, lambda: self.image_label.config(image="", text="Waiting for network drive...\n(polling every 10 seconds)"))
         self.polling_thread = threading.Thread(target=self._poll_network_drive, daemon=True)
         self.polling_thread.start()
     
@@ -754,14 +756,15 @@ class FullscreenImageApp:
             try:
                 if os.path.exists(NETWORK_BASE_PATH) and os.path.isdir(NETWORK_BASE_PATH):
                     logger.info("Network drive found!")
-                    self.network_available = True
+                    self.root.after(0, lambda: self.set_online_state(True))
                     self.root.after(0, lambda: self.on_dept_select(None))
                     return
                 else:
                     logger.debug("Network drive not available yet")
-                    self.root.after(0, lambda: self.image_label.config(image="", text="Waiting for network drive...\n(polling every 10 seconds)"))
+                    self.root.after(0, lambda: self.set_online_state(False))
             except Exception as e:
                 logger.debug(f"Network poll error: {e}")
+                self.root.after(0, lambda: self.set_online_state(False))
             
             for _ in range(100):
                 if self.polling_stop.is_set():
