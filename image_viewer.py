@@ -12,14 +12,19 @@ from logging.handlers import RotatingFileHandler
 import gc
 import re
 import hashlib
+from collections import OrderedDict
 from PIL import Image, ImageTk
+
+# File size constants
+LOG_MAX_BYTES = 5 * 1024 * 1024  # 5MB
+LOG_BACKUP_COUNT = 5
 
 LOG_FILE = "/var/log/pi-photo-viewer/app.log"
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 try:
-    handler = RotatingFileHandler(LOG_FILE, maxBytes=5*1024*1024, backupCount=5)
+    handler = RotatingFileHandler(LOG_FILE, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUP_COUNT)
     formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
     handler.setFormatter(formatter)
     logger.addHandler(handler)
@@ -49,6 +54,17 @@ LOGO_WIDTH = 175
 IMAGE_CACHE_SIZE = 20  # Increased from 2 to 20 - keeps 10 files (front+back) in memory
 MAX_IMAGE_DIMENSION = 1920
 CACHE_STALE_DAYS = 7
+
+# Timing constants (in milliseconds)
+FULLSCREEN_DELAY_MS = 200
+AUTO_COLLAPSE_DELAY_MS = 2000
+CONTROL_COLLAPSE_TIMEOUT_MS = 30000
+NETWORK_POLL_INTERVAL_MS = 10000
+
+# Thread timeout constants (in seconds)
+THREAD_JOIN_TIMEOUT_SHORT = 1.0
+THREAD_JOIN_TIMEOUT_LONG = 2.0
+NETWORK_POLL_INTERVAL_SEC = 10
 
 SHEET_MAPPING = {
     "front": ["front", "front page", "proposal"],
@@ -277,34 +293,35 @@ class TouchDropdown(tk.Frame):
 
 class ImageCache:
     def __init__(self, max_size=IMAGE_CACHE_SIZE):
-        self.cache = {}
+        self.cache = OrderedDict()
         self.max_size = max_size
-        self.order = []
         logger.info(f"Memory cache initialized (max size: {max_size} images)")
-    
+
     def get(self, path):
         if path in self.cache:
-            self.order.remove(path)
-            self.order.append(path)
+            # Move to end (most recently used)
+            self.cache.move_to_end(path)
             logger.info(f"[INSTANT LOAD] Memory cache hit - displaying immediately!")
             return self.cache[path]
         return None
-    
+
     def put(self, path, photo):
         if path in self.cache:
-            self.order.remove(path)
-        elif len(self.cache) >= self.max_size:
-            removed = self.order.pop(0)
-            if removed in self.cache:
-                logger.debug(f"Evicting from cache: {removed}")
-                del self.cache[removed]
-        
+            # Update and move to end
+            self.cache.move_to_end(path)
+        else:
+            if len(self.cache) >= self.max_size:
+                # Remove oldest (first) item
+                removed_key, removed_photo = self.cache.popitem(last=False)
+                logger.debug(f"Evicting from cache: {removed_key}")
+                del removed_photo  # Explicitly delete to help GC
+                gc.collect()
+
         self.cache[path] = photo
-        self.order.append(path)
         logger.debug(f"Memory cache now contains {len(self.cache)}/{self.max_size} images")
 
 class ExcelConverter:
-    def __init__(self, cache_dir="/tmp/pi-photo-viewer-cache"):
+    def __init__(self, cache_dir="/var/cache/pi-photo-viewer"):
         self.cache_dir = cache_dir
         self.conversion_lock = threading.Lock()
         os.makedirs(cache_dir, exist_ok=True)
@@ -534,14 +551,14 @@ class FullscreenImageApp:
         self.root = root
         self.root.title("Pi Standards Viewer - Network")
         logger.info("App starting")
-        
-        self.root.after(200, lambda: self.root.attributes("-fullscreen", True))
+
+        self.root.after(FULLSCREEN_DELAY_MS, lambda: self.root.attributes("-fullscreen", True))
         self.root.configure(bg="black")
-        
+
         self.control_bar_collapsed_height = 80
         self.control_bar_expanded_height = 220
         self.collapse_timer = None
-        self.collapse_delay = 30000
+        self.collapse_delay = CONTROL_COLLAPSE_TIMEOUT_MS
 
         self.control_frame = tk.Frame(root, bg="#1F2937", pady=10, padx=30)
         self.control_frame.pack(side="bottom", fill="x")
@@ -661,6 +678,7 @@ class FullscreenImageApp:
         self.excel_converter = ExcelConverter()
 
         # Thread management with explicit per-thread stop events
+        self.thread_lock = threading.Lock()  # Protect thread state changes
         self.bg_precache_thread = None
         self.bg_precache_stop = None
         self.fg_precache_thread = None
@@ -746,19 +764,28 @@ class FullscreenImageApp:
 
         # Stop polling
         self.polling_stop.set()
-        
-        # Stop background precache
-        if self.bg_precache_stop:
-            self.bg_precache_stop.set()
-        if self.bg_precache_thread and self.bg_precache_thread.is_alive():
-            self.bg_precache_thread.join(timeout=2.0)
-        
-        # Stop foreground precache
-        if self.fg_precache_stop:
-            self.fg_precache_stop.set()
-        if self.fg_precache_thread and self.fg_precache_thread.is_alive():
-            self.fg_precache_thread.join(timeout=2.0)
-        
+
+        # Stop background and foreground precache threads
+        with self.thread_lock:
+            if self.bg_precache_stop:
+                self.bg_precache_stop.set()
+            bg_thread = self.bg_precache_thread
+
+            if self.fg_precache_stop:
+                self.fg_precache_stop.set()
+            fg_thread = self.fg_precache_thread
+
+        # Wait for threads outside the lock
+        if bg_thread and bg_thread.is_alive():
+            bg_thread.join(timeout=THREAD_JOIN_TIMEOUT_LONG)
+            if bg_thread.is_alive():
+                logger.warning("Background precache thread did not stop during shutdown")
+
+        if fg_thread and fg_thread.is_alive():
+            fg_thread.join(timeout=THREAD_JOIN_TIMEOUT_LONG)
+            if fg_thread.is_alive():
+                logger.warning("Foreground precache thread did not stop during shutdown")
+
         self.root.quit()
     
     def set_online_state(self, online: bool):
@@ -819,22 +846,34 @@ class FullscreenImageApp:
             return
         
         # Stop old background precache thread safely
-        if self.bg_precache_stop and self.bg_precache_thread:
-            logger.debug("Stopping old bg precache thread")
-            self.bg_precache_stop.set()
-            self.bg_precache_thread.join(timeout=2.0)
-        
+        with self.thread_lock:
+            if self.bg_precache_stop and self.bg_precache_thread:
+                logger.debug("Stopping old bg precache thread")
+                self.bg_precache_stop.set()
+                old_thread = self.bg_precache_thread
+                self.bg_precache_thread = None
+                self.bg_precache_stop = None
+            else:
+                old_thread = None
+
+        # Wait for old thread outside the lock to avoid deadlock
+        if old_thread:
+            old_thread.join(timeout=THREAD_JOIN_TIMEOUT_LONG)
+            if old_thread.is_alive():
+                logger.warning("Background precache thread did not stop cleanly")
+
         # Start new background precache with fresh stop event
         dept = self.dept_var.get()
         if dept:
             logger.info(f"Starting bg precache for {dept}")
-            self.bg_precache_stop = threading.Event()
-            self.bg_precache_thread = threading.Thread(
-                target=self.precache_dept,
-                args=(dept, self.bg_precache_stop),
-                daemon=True
-            )
-            self.bg_precache_thread.start()
+            with self.thread_lock:
+                self.bg_precache_stop = threading.Event()
+                self.bg_precache_thread = threading.Thread(
+                    target=self.precache_dept,
+                    args=(dept, self.bg_precache_stop),
+                    daemon=True
+                )
+                self.bg_precache_thread.start()
         
         if self.is_expanded:
             self.root.after(0, self.reset_collapse_timer)
@@ -876,23 +915,35 @@ class FullscreenImageApp:
 
     def on_model_select(self, _value=None):
         # Stop old foreground precache
-        if self.fg_precache_stop and self.fg_precache_thread:
-            logger.debug("Stopping old fg precache thread")
-            self.fg_precache_stop.set()
-            self.fg_precache_thread.join(timeout=1.0)
-        
+        with self.thread_lock:
+            if self.fg_precache_stop and self.fg_precache_thread:
+                logger.debug("Stopping old fg precache thread")
+                self.fg_precache_stop.set()
+                old_thread = self.fg_precache_thread
+                self.fg_precache_thread = None
+                self.fg_precache_stop = None
+            else:
+                old_thread = None
+
+        # Wait for old thread outside the lock
+        if old_thread:
+            old_thread.join(timeout=THREAD_JOIN_TIMEOUT_SHORT)
+            if old_thread.is_alive():
+                logger.warning("Foreground precache thread did not stop cleanly")
+
         self.update_files()
-        
+
         # Start new foreground precache
         if self.current_model_path:
             logger.info(f"Starting fg precache for {os.path.basename(self.current_model_path)}")
-            self.fg_precache_stop = threading.Event()
-            self.fg_precache_thread = threading.Thread(
-                target=self.precache_model_aggressive,
-                args=(self.current_model_path, self.fg_precache_stop),
-                daemon=True
-            )
-            self.fg_precache_thread.start()
+            with self.thread_lock:
+                self.fg_precache_stop = threading.Event()
+                self.fg_precache_thread = threading.Thread(
+                    target=self.precache_model_aggressive,
+                    args=(self.current_model_path, self.fg_precache_stop),
+                    daemon=True
+                )
+                self.fg_precache_thread.start()
         
         if self.is_expanded:
             self.root.after(0, self.reset_collapse_timer)
@@ -963,8 +1014,8 @@ class FullscreenImageApp:
             for btn in [self.front_button, self.back_button, self.front_button_exp, self.back_button_exp]:
                 btn.config(state="disabled")
             self.display_file(self.current_file_path, "Image")
-        
-        self.root.after(2000, self.collapse_controls)
+
+        self.root.after(AUTO_COLLAPSE_DELAY_MS, self.collapse_controls)
         if self.is_expanded:
             self.reset_collapse_timer()
     

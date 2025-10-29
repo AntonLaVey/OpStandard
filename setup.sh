@@ -38,23 +38,39 @@ if [ $? -ne 0 ]; then
 fi
 
 echo "[2/7] Installing Python packages..."
-pip3 install openpyxl --break-system-packages 2>/dev/null || pip3 install openpyxl
+# Download requirements.txt from GitHub
+REQUIREMENTS_URL="https://raw.githubusercontent.com/$GITHUB_USER/$GITHUB_REPO/$GITHUB_BRANCH/requirements.txt"
+curl -fsSL "$REQUIREMENTS_URL" -o /tmp/requirements.txt 2>/dev/null || true
 
-echo "[3/7] Setting up logging..."
+if [ -f /tmp/requirements.txt ]; then
+    pip3 install -r /tmp/requirements.txt --break-system-packages 2>/dev/null || pip3 install -r /tmp/requirements.txt
+    rm /tmp/requirements.txt
+else
+    # Fallback to direct installation if requirements.txt not available
+    pip3 install openpyxl --break-system-packages 2>/dev/null || pip3 install openpyxl
+fi
+
+echo "[3/7] Setting up logging and cache..."
 mkdir -p "$LOG_DIR"
 chown "$REAL_USER":"$REAL_USER" "$LOG_DIR"
 chmod 755 "$LOG_DIR"
 touch "$LOG_FILE"
 chown "$REAL_USER":"$REAL_USER" "$LOG_FILE"
 
-cat > /etc/logrotate.d/pi-photo-viewer << 'EOF'
+# Create cache directory with secure permissions
+CACHE_DIR="/var/cache/pi-photo-viewer"
+mkdir -p "$CACHE_DIR"
+chown "$REAL_USER":"$REAL_USER" "$CACHE_DIR"
+chmod 700 "$CACHE_DIR"  # Only owner can access
+
+cat > /etc/logrotate.d/pi-photo-viewer << EOF
 /var/log/pi-photo-viewer/app.log {
     daily
     rotate 7
     compress
     delaycompress
     notifempty
-    create 0644 pi pi
+    create 0644 $REAL_USER $REAL_USER
 }
 EOF
 
@@ -108,7 +124,7 @@ After=graphical.target
 
 [Service]
 Type=simple
-User=pi
+User=$REAL_USER
 Environment="DISPLAY=:0"
 Environment="XAUTHORITY=$HOME_DIR/.Xauthority"
 ExecStartPre=/bin/sleep 5
@@ -143,7 +159,7 @@ EOF
 chown "$REAL_USER":"$REAL_USER" "$HOME_DIR/Desktop/PhotoViewer.desktop"
 chmod +x "$HOME_DIR/Desktop/PhotoViewer.desktop"
 
-usermod -a -G video pi
+usermod -a -G video "$REAL_USER"
 chmod 644 /etc/systemd/system/pi-photo-viewer.service
 
 echo "[7/7] Disabling USB pop-ups..."

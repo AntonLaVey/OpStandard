@@ -4,7 +4,7 @@ import os
 from PIL import Image, ImageTk
 import threading
 import time
-from collections import Counter
+from collections import Counter, OrderedDict
 import subprocess
 import logging
 from logging.handlers import RotatingFileHandler
@@ -22,8 +22,9 @@ try:
     formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
     handler.setFormatter(formatter)
     logger.addHandler(handler)
-except:
-    pass
+except (OSError, PermissionError) as e:
+    logging.basicConfig(level=logging.INFO)
+    logger.warning(f"Could not create file logger: {e}")
 
 USB_BASE_PATH = "/media/pi"
 SUPPORTED_FORMATS = (".xlsx", ".png", ".jpg", ".jpeg", ".gif", ".bmp")
@@ -42,39 +43,61 @@ SHEET_MAPPING = {
 
 class ImageCache:
     def __init__(self, max_size=IMAGE_CACHE_SIZE):
-        self.cache = {}
+        self.cache = OrderedDict()
         self.max_size = max_size
-        self.order = []
-    
+
     def get(self, path):
         if path in self.cache:
-            self.order.remove(path)
-            self.order.append(path)
+            # Move to end (most recently used)
+            self.cache.move_to_end(path)
             return self.cache[path]
         return None
-    
+
     def put(self, path, photo):
         if path in self.cache:
-            self.order.remove(path)
-        elif len(self.cache) >= self.max_size:
-            removed = self.order.pop(0)
-            if removed in self.cache:
-                del self.cache[removed]
-            gc.collect()
+            # Update and move to end
+            self.cache.move_to_end(path)
+        else:
+            if len(self.cache) >= self.max_size:
+                # Remove oldest (first) item
+                removed_key, removed_photo = self.cache.popitem(last=False)
+                del removed_photo  # Explicitly delete to help GC
+                gc.collect()
+
         self.cache[path] = photo
-        self.order.append(path)
-    
+
     def clear(self):
         self.cache.clear()
-        self.order.clear()
         gc.collect()
 
 class ExcelConverter:
-    def __init__(self, cache_dir="/tmp/pi-photo-viewer-cache"):
+    def __init__(self, cache_dir="/var/cache/pi-photo-viewer"):
         self.cache_dir = cache_dir
         self.conversion_lock = threading.Lock()  # Prevent concurrent conversions
         os.makedirs(cache_dir, exist_ok=True)
-    
+        self._check_tools()
+
+    def _check_tools(self):
+        """Verify required tools are available - checks both 'convert' and 'magick'"""
+        tools_required = ["libreoffice", "pdftoppm"]
+
+        missing = []
+        for tool in tools_required:
+            if not shutil.which(tool):
+                missing.append(tool)
+
+        # Check for ImageMagick (either convert or magick)
+        self.imagemagick_cmd = None
+        if shutil.which("convert"):
+            self.imagemagick_cmd = "convert"
+        elif shutil.which("magick"):
+            self.imagemagick_cmd = "magick"
+        else:
+            missing.append("convert/magick")
+
+        if missing:
+            logger.error(f"Missing required tools: {', '.join(missing)}")
+
     def find_sheet(self, excel_path, sheet_type):
         try:
             from openpyxl import load_workbook
@@ -204,14 +227,17 @@ class ExcelConverter:
                        "-singlefile", "-r", "150", pdf_path, output_prefix]
                 result = subprocess.run(cmd, capture_output=True, timeout=30, text=True)
                 
-                if result.returncode != 0:
+                if result.returncode != 0 and self.imagemagick_cmd:
                     logger.warning(f"pdftoppm failed: {result.stderr}")
-                    logger.info("Trying ImageMagick fallback...")
-                    cmd = ["convert", "-density", "100", f"{pdf_path}[{sheet_index}]", cache_path]
+                    logger.info(f"Trying ImageMagick fallback ({self.imagemagick_cmd})...")
+                    cmd = [self.imagemagick_cmd, "-density", "100", f"{pdf_path}[{sheet_index}]", cache_path]
                     result = subprocess.run(cmd, capture_output=True, timeout=30, text=True)
                     if result.returncode != 0:
                         logger.error(f"ImageMagick also failed: {result.stderr}")
                         return None
+                elif result.returncode != 0:
+                    logger.error("pdftoppm failed and no ImageMagick alternative available")
+                    return None
                 
                 if os.path.exists(cache_path):
                     logger.info(f"Successfully converted to PNG: {cache_path}")
@@ -252,8 +278,8 @@ class MediaWatcher:
             subprocess.run(["which", "inotifywait"], capture_output=True, timeout=2, check=True)
             logger.info("inotifywait found - using real-time USB detection")
             return True
-        except:
-            logger.warning("inotifywait not found - falling back to polling")
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as e:
+            logger.warning(f"inotifywait not found - falling back to polling: {e}")
             return False
     
     def get_media_state(self):
@@ -267,10 +293,11 @@ class MediaWatcher:
                     try:
                         items = os.listdir(drive_path)
                         state[drive] = hash(tuple(sorted(items)))
-                    except:
+                    except (OSError, PermissionError) as e:
+                        logger.debug(f"Cannot access drive {drive}: {e}")
                         continue
-        except:
-            pass
+        except (OSError, PermissionError) as e:
+            logger.debug(f"Cannot access media path {self.base_path}: {e}")
         return state
     
     def watch_with_inotify(self):
